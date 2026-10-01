@@ -186,7 +186,7 @@ export default function App() {
             </main>
 
             {/* ---- right: inspector ---- */}
-            <aside className="hidden w-72 shrink-0 flex-col border-l bg-background lg:block xl:w-[22rem]">
+            <aside className="hidden w-72 shrink-0 flex-col border-l bg-background lg:block xl:w-88">
               <Inspector />
             </aside>
 
@@ -250,7 +250,7 @@ function ProjectStrip({
         title="Project settings (,)"
       >
         <Settings2 className="h-3.5 w-3.5 shrink-0" />
-        <span className="hidden max-w-[8rem] truncate sm:inline">{project.name}</span>
+        <span className="hidden max-w-32 truncate sm:inline">{project.name}</span>
       </button>
       <Separator orientation="vertical" className="hidden h-4 sm:block" />
       <button
