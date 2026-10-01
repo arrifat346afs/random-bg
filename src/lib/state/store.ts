@@ -114,7 +114,15 @@ function initialTheme(): ViewState['theme'] {
   return 'system'
 }
 
-function initialView(): ViewState {
+/**
+ * Initial view state, merged over a previously persisted partial.
+ *
+ * Exported and pure so the migration path is directly testable. `saved` is
+ * Partial, so a view persisted before a field existed simply has no key for it
+ * and inherits the base default — adding a field here is backward compatible
+ * for every existing user without a schema version bump.
+ */
+export function initialView(saved?: Partial<ViewState> | null): ViewState {
   const base: ViewState = {
     zoom: 1,
     panX: 0,
@@ -123,17 +131,13 @@ function initialView(): ViewState {
     theme: initialTheme(),
     lockAspect: true,
   }
-  const saved = loadJSON<Partial<ViewState>>(KEYS.view)
-  // `saved` is Partial, so a view persisted before the lock existed simply has
-  // no `lockAspect` key and inherits the `true` default from `base`.
-  if (saved) return { ...base, ...saved, theme: base.theme }
-  return base
+  return saved ? { ...base, ...saved, theme: base.theme } : base
 }
 
 let state: AppState = {
   project: initialProject(),
   selectedLayerId: null,
-  view: initialView(),
+  view: initialView(loadJSON<Partial<ViewState>>(KEYS.view)),
   past: [],
   future: [],
   version: 1,
