@@ -12,6 +12,27 @@ import { writeFileSync, mkdirSync } from 'node:fs'
 const outDir = '/tmp/opencode/fx-forge'
 mkdirSync(outDir, { recursive: true })
 
+/**
+ * Portability guard. These are constructs browsers accept but strict SVG
+ * renderers (Inkscape, resvg, librsvg, Illustrator) silently mishandle. They
+ * cost a black or flat image with no error anywhere, so they must fail loudly
+ * rather than ship.
+ */
+let portableFailures = 0
+function checkPortable(name: string, svg: string) {
+  const bad: string[] = []
+  if (/="rgba\(/.test(svg)) bad.push('rgba() in a presentation attribute renders black in Inkscape/resvg')
+  if (/="hsl\(/.test(svg)) bad.push('hsl() in a presentation attribute')
+  if (/mix-blend-mode="plus-lighter"/.test(svg))
+    bad.push('plus-lighter as a presentation attribute — strict renderers drop the blend')
+  if (/style="[^"]*mix-blend-mode/.test(svg))
+    bad.push('mix-blend-mode in style="" — use the presentation attribute')
+  if (bad.length) {
+    portableFailures++
+    for (const b of bad) console.log(`  !! ${name}: ${b}`)
+  }
+}
+
 async function render(name: string, project: ReturnType<typeof createProject>) {
   const results = []
   for (const layer of activeLayers(project)) results.push(await generateLayer(layer, project))
@@ -19,6 +40,7 @@ async function render(name: string, project: ReturnType<typeof createProject>) {
   const ir = buildIR(project.canvas.w, project.canvas.h, nodes)
   const svg = renderSVG(ir, { background: project.canvas.bg })
   writeFileSync(`${outDir}/${name}.svg`, svg)
+  checkPortable(name, svg)
   console.log(
     `${name.padEnd(18)} nodes=${String(ir.stats.count).padStart(6)} ` +
       `blurs=${String(ir.stats.blurs).padStart(5)} bytes=${String(svg.length).padStart(7)} ` +
@@ -73,6 +95,14 @@ for (let i = 0; i < 8; i++) {
   console.log(
     `  #${i} ${proj.name.padEnd(22)} layers=${proj.layers.length} prims=${String(count).padStart(6)} bg=${proj.canvas.bg.kind}`,
   )
+}
+
+console.log('— svg portability —')
+if (portableFailures === 0) {
+  console.log('  no renderer-hostile constructs ✓')
+} else {
+  console.log(`  ${portableFailures} file(s) use constructs strict SVG renderers mishandle`)
+  process.exitCode = 1
 }
 
 console.log('OK', ir1.stats)

@@ -313,7 +313,7 @@ export function ExportDialog({ open, onOpenChange }: Props) {
               <Row
                 id="flatten"
                 label="Flatten additive glow"
-                hint="Emits `screen` instead of `plus-lighter` for strict SVG rasterisers."
+                hint="On pins `screen` in every renderer. Off still falls back to `screen` outside browsers, so this only costs you true additive glow."
                 checked={flatten}
                 onChange={setFlatten}
               />

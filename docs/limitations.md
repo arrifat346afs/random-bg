@@ -15,14 +15,43 @@ deliberate tradeoff or a known boundary of the procedural approach.
   adaptive steps for cache-friendliness; SVG uses the true `stdDeviation`.
   Pixel diffs between the two backends concentrate here (measured mean abs
   diff 0.93/255 across presets).
-- **Blend-mode caveats in SVG.** `plus-lighter` has no SVG equivalent and is
-  approximated; `screen`/`overlay` also differ subtly from canvas compositing.
+- **Blend-mode caveats in SVG.** `plus-lighter` is CSS-native but browser-only.
+  It is exported as `mix-blend-mode="screen"` plus a `<style>` rule that
+  upgrades browsers back to `plus-lighter`; renderers that ignore the
+  stylesheet keep `screen` instead of dropping the blend. `screen`/`overlay`
+  also differ subtly from canvas compositing.
 - **Sharpness is raster-clamped at extreme zoom.** The preview renders vector
   IR, but zooming past the rasterised resolution magnifies pixels like any
   bitmap preview. Exports re-render at full resolution.
 - **Irreducible-overdraw presets exist.** A handful of presets (`aurora-veil`,
   `sunset-light-trails`) are simply dense by design and will always be the
   slowest renders — that is their look, not a bug.
+
+## SVG renderer portability
+
+Exported SVG targets Inkscape, resvg, librsvg and browsers. Measured, not
+assumed — `scripts/check.ts` fails the build if a renderer-hostile construct
+reappears in generated output.
+
+| Construct | Browser | Inkscape | librsvg |
+| --- | --- | --- | --- |
+| `stop-color` + `stop-opacity` | yes | yes | yes |
+| `stop-color="rgba(...)"` | yes | **no — renders black** | yes |
+| `mix-blend-mode="screen"` | yes | yes | yes |
+| `mix-blend-mode="plus-lighter"` | yes | **no — blend dropped** | **no — blend dropped** |
+| `<feGaussianBlur>` + `color-interpolation-filters="sRGB"` | yes | yes | yes |
+| Presentation attributes over `style=""` | yes | yes | yes |
+
+Two rules the SVG backend follows because of this table:
+
+- **Never `rgba()`/`hsl()` in a presentation attribute.** Alpha goes in a
+  separate `stop-opacity`/`fill-opacity`. A `rgba()` gradient stop is not a
+  cosmetic difference — Inkscape parses it as black, and since gradient fills
+  are nearly every node in a glow preset, the whole export goes black.
+- **Never `plus-lighter` in a presentation attribute.** The attribute carries
+  `screen`; a `<style>` rule upgrades browsers, which outrank presentation
+  attributes in the cascade. Renderers ignoring the stylesheet degrade to
+  `screen` rather than losing the blend.
 
 ## Randomiser and quality gate
 
@@ -60,8 +89,6 @@ deliberate tradeoff or a known boundary of the procedural approach.
 
 ## Process boundaries
 
-- **No git repository** in the working directory — all history lives in the
-  session, not in version control.
 - **Screenshots lie; metrics do not.** The `read` tool has returned
   stale/incorrect images in this environment, so all visual QA here is
   programmatic (CDP geometry, pixel statistics, `outputs/random20.png` is

@@ -7,10 +7,14 @@
  *  - Blur           → <filter><feGaussianBlur color-interpolation-filters="sRGB">
  *                     sRGB keeps blurs premultiplied-friendly, so transparent
  *                     exports do NOT get dark halos.
- *  - Blend modes    → CSS `mix-blend-mode` (16 of 17 modes are CSS-native).
- *  - plus-lighter   → emitted as CSS `mix-blend-mode:plus-lighter`, which
- *                     browsers support; with `flattenAdditive:true` it degrades
- *                     to `screen` for strict renderers (resvg/librsvg).
+ *  - Blend modes    → the `mix-blend-mode` presentation attribute (16 of 17
+ *                     modes are CSS-native).
+ *  - plus-lighter   → browser-only. The attribute carries `screen` and a
+ *                     `<style>` rule upgrades browsers to `plus-lighter`, so
+ *                     browsers get true additive glow and strict renderers
+ *                     (Inkscape/resvg/librsvg) still get `screen` instead of
+ *                     silently dropping the blend. `flattenAdditive:true`
+ *                     pins `screen` everywhere.
  *  - stroke opacity ramps → linear-gradient stroke (same as canvas).
  *  - Variable-width strokes → never used: generators emit filled outlines.
  * Anything else is rasterised on export (see export.ts).
@@ -44,12 +48,14 @@ function stopsSvg(stops: GradientStop[]): string {
   return stops
     .map((s) => {
       const [r, g, b] = hexToRgb(s.c)
-      const a = s.o
-      const color =
-        a >= 0.999
-          ? `#${hex2(r)}${hex2(g)}${hex2(b)}`
-          : `rgba(${r},${g},${b},${Number(a.toFixed(4))})`
-      return `<stop offset="${fmt(Math.max(0, Math.min(1, s.t)), 4)}" stop-color="${color}"/>`
+      const col = `#${hex2(r)}${hex2(g)}${hex2(b)}`
+      // Always hex + stop-opacity, never `rgba()`. A `rgba()` colour in a
+      // presentation attribute is SVG 2 / CSS Color 4; Inkscape, resvg and
+      // librsvg fail to parse it and silently fall back to black, which turns
+      // the whole artwork black. Mirrors the solid-fill path in paintAttr().
+      const op = Number(s.o.toFixed(4))
+      const opAttr = op >= 0.999 ? '' : ` stop-opacity="${op}"`
+      return `<stop offset="${fmt(Math.max(0, Math.min(1, s.t)), 4)}" stop-color="${col}"${opAttr}/>`
     })
     .join('')
 }
@@ -131,6 +137,8 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
   const d = opts.decimals ?? 2
   const defs = new Map<string, string>()
   const filters = new Map<string, string>()
+  /** any node relying on the <style> plus-lighter upgrade? */
+  let hasAdditive = false
 
   const body: string[] = []
 
@@ -193,9 +201,24 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
     if (node.dash) attrs.push(`stroke-dasharray="${node.dash.map((v) => fmt(v, 2)).join(' ')}"`)
     if (node.op !== undefined && node.op < 0.999) attrs.push(`opacity="${Number(node.op.toFixed(4))}"`)
 
-    const styles: string[] = []
-    const blend = blendCss(node.blend ?? 'normal', opts.flattenAdditive ?? false)
-    if (blend) styles.push(`mix-blend-mode:${blend}`)
+    // Blend and filter go out as *presentation attributes*, which every
+    // renderer understands, rather than CSS in a style="" attribute.
+    const flatten = opts.flattenAdditive ?? false
+    const blend = blendCss(node.blend ?? 'normal', flatten)
+    if (blend) {
+      if (!flatten && blend === 'plus-lighter') {
+        // `plus-lighter` is browser-only: Inkscape/resvg/librsvg don't know the
+        // value and render the node unblended, which flattens every additive
+        // glow. So the attribute carries the universally-supported `screen`
+        // fallback and a <style> rule upgrades browsers to true additive —
+        // CSS outranks presentation attributes in the cascade, and renderers
+        // that ignore the stylesheet keep `screen`.
+        attrs.push('mix-blend-mode="screen"', 'class="additive"')
+        hasAdditive = true
+      } else {
+        attrs.push(`mix-blend-mode="${blend}"`)
+      }
+    }
     if (node.blur && node.blur > 0.05) {
       const key = `b${Math.round(node.blur * 100)}`
       if (!filters.has(key)) {
@@ -206,9 +229,8 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
             `<feGaussianBlur stdDeviation="${fmt(node.blur, 2)}"/></filter>`,
         )
       }
-      styles.push(`filter:url(#${key})`)
+      attrs.push(`filter="url(#${key})"`)
     }
-    if (styles.length) attrs.push(`style="${styles.join(';')}"`)
 
     body.push(`${geo} ${attrs.join(' ')}/>`)
   }
@@ -216,6 +238,8 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
   const allDefs = [...defs.values(), ...filters.values()].join('')
   const wAttr = opts.viewboxOnly ? '' : ` width="${fmt(ir.w, 0)}" height="${fmt(ir.h, 0)}"`
   const defsBlock = allDefs ? `<defs>${allDefs}</defs>` : ''
+  // Only emitted when something needs it, so additive-free exports are unchanged.
+  const styleBlock = hasAdditive ? `<style>.additive{mix-blend-mode:plus-lighter}</style>` : ''
 
   return (
     `<svg xmlns="http://www.w3.org/2000/svg"${wAttr} ` +
@@ -223,6 +247,7 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
     `xmlns:xlink="http://www.w3.org/1999/xlink" ` +
     `shape-rendering="geometricPrecision">` +
     `<g style="isolation:isolate">` +
+    styleBlock +
     defsBlock +
     body.join('') +
     `</g></svg>`
@@ -234,7 +259,7 @@ export function svgCaveats(ir: IR): string[] {
   const out: string[] = []
   if (ir.stats.additive)
     out.push(
-      '`plus-lighter` blending is emitted as CSS `mix-blend-mode:plus-lighter`. Browsers render it correctly; strict SVG rasterisers (resvg, librsvg) fall back to `screen`.',
+      '`plus-lighter` glow is exported as `mix-blend-mode="screen"` plus a `<style>` rule that upgrades browsers to `plus-lighter`. Browsers get true additive blending; Inkscape, resvg and librsvg keep `screen` rather than dropping the blend entirely.',
     )
   if (ir.stats.blurs > 0)
     out.push(
