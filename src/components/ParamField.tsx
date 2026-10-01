@@ -2,13 +2,12 @@ import type { ParamDef, ParamValue } from '@/lib/schema'
 import { Slider } from '@/components/ui/slider'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { useUiStore } from '@/store/uiStore'
+import { LockButton } from './param-field/LockButton'
+import { NumInput } from './param-field/NumInput'
+import { RandomButton } from './param-field/RandomButton'
+import { logToNorm, normToLog } from './param-field/scale'
 import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Button } from '@/components/ui/button'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { Dices, Lock, LockOpen } from 'lucide-react'
-import { cn } from '@/lib/utils'
 
 export interface ParamFieldProps {
   /** owning layer, so each field's uncommitted draft is its own */
@@ -218,135 +217,4 @@ export function ParamField({
 
 /* ---- helpers ------------------------------------------------------------- */
 
-function NumInput({
-  value,
-  min,
-  max,
-  step,
-  onChange,
-  disabled,
-  id,
-  draftKey,
-}: {
-  value: number
-  min?: number
-  max?: number
-  step: number
-  onChange: (v: number) => void
-  disabled?: boolean
-  id?: string
-  /** layer + param identity, so each field's draft is its own */
-  draftKey: string
-}) {
-  const ui = () => useUiStore.getState()
-  const stored = useUiStore((s) => s.paramDrafts[draftKey])
-  const draft = stored ?? String(round(value, step))
-  const setDraft = (t: string) => ui().setParamDraft(draftKey, t)
-
-  // Adopt the upstream value when it changes (undo/redo, randomise) — unless
-  // the user is mid-edit in this exact field. Adjusting while rendering is
-  // cheaper and safer than syncing in an effect, and `paramDriftsAt` is the
-  // store-side memory for "the value this draft was seeded from".
-  const driftKey = ui().paramDrifts[draftKey]
-  if (driftKey !== value) {
-    ui().markParamDrift(draftKey, value)
-    ui().clearParamDraft(draftKey)
-  }
-
-  const commit = (text: string) => {
-    const n = Number(text)
-    if (!Number.isFinite(n)) {
-      setDraft(String(round(value, step)))
-      return
-    }
-    let v = n
-    if (min !== undefined) v = Math.max(min, v)
-    if (max !== undefined) v = Math.min(max, v)
-    onChange(v)
-    setDraft(String(round(v, step)))
-  }
-
-  return (
-    <Input
-      id={id}
-      type="number"
-      value={draft}
-      min={min}
-      max={max}
-      step={step}
-      disabled={disabled}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={(e) => commit(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-          const dir = e.key === 'ArrowUp' ? 1 : -1
-          const next = value + dir * step * (e.shiftKey ? 10 : 1)
-          const clamped = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, next))
-          onChange(clamped)
-          setDraft(String(round(clamped, step)))
-          e.preventDefault()
-        }
-      }}
-      className="h-7 w-[74px] shrink-0 px-1.5 text-right text-xs tabular-nums"
-    />
-  )
-}
-
-function LockButton({ locked, onToggle, label }: { locked: boolean; onToggle: () => void; label: string }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          type="button"
-          size="icon-sm"
-          variant="ghost"
-          aria-label={locked ? `Unlock ${label}` : `Lock ${label}`}
-          aria-pressed={locked}
-          onClick={onToggle}
-          className={cn('h-6 w-6 text-muted-foreground', locked && 'text-primary')}
-        >
-          {locked ? <Lock /> : <LockOpen />}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>{locked ? 'Locked — randomise skips this' : 'Lock this parameter'}</TooltipContent>
-    </Tooltip>
-  )
-}
-
-function RandomButton({ onClick, label }: { onClick: () => void; label: string }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          type="button"
-          size="icon-sm"
-          variant="ghost"
-          aria-label={`Randomise ${label}`}
-          onClick={onClick}
-          className="h-6 w-6 text-muted-foreground hover:text-primary"
-        >
-          <Dices />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>Randomise this parameter</TooltipContent>
-    </Tooltip>
-  )
-}
-
-function round(v: number, step: number): number {
-  const decimals = step >= 1 ? 0 : Math.min(4, Math.ceil(-Math.log10(step)) || 2)
-  return Number(v.toFixed(decimals))
-}
-
 /** Log-ish slider mapping so wide ranges stay usable. */
-function logToNorm(v: number, min: number, max: number): number {
-  const a = Math.log(Math.max(1e-6, min || 1e-6))
-  const b = Math.log(max)
-  return (Math.log(Math.max(1e-6, v)) - a) / (b - a || 1)
-}
-function normToLog(t: number, min: number, max: number): number {
-  const a = Math.log(Math.max(1e-6, min || 1e-6))
-  const b = Math.log(max)
-  return Math.exp(a + t * (b - a))
-}

@@ -12,15 +12,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Switch } from '@/components/ui/switch'
 import { SIZE_PRESETS } from '@/lib/schema'
 import {
@@ -39,6 +30,10 @@ import {
   Ratio,
 } from 'lucide-react'
 import { useProjectStore } from '@/store/projectStore'
+import { MenuItem } from './top-bar/MenuItem'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { SeedDialog } from './top-bar/SeedDialog'
+import { Tip } from './top-bar/Tip'
 import { useRenderStore } from '@/store/renderStore'
 import { useUiStore } from '@/store/uiStore'
 
@@ -371,61 +366,6 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
 
       <SeedDialog open={showSeed} onClose={() => ui().setShowSeed(false)} seed={seed} />
     </header>
-  )
-}
-
-function MenuItem({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      onClick={onClick}
-      className="flex w-full select-none items-center rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent hover:text-accent-foreground"
-    >
-      {children}
-    </button>
-  )
-}
-
-function Tip({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  )
-}
-
-function SeedDialog({
-  open,
-  onClose,
-  seed,
-}: {
-  open: boolean
-  onClose: () => void
-  seed: number
-}) {
-  return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>Seed</DialogTitle>
-          <DialogDescription>
-            The seed fully determines the project. Share it to reproduce this exact render.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="rounded-lg border bg-muted/50 p-3 text-center font-mono text-lg tabular-nums">
-          {seed}
-        </div>
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => void navigator.clipboard?.writeText(String(seed)).catch(() => {})}
-          >
-            Copy number
-          </Button>
-          <Button onClick={onClose}>Done</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }
 
