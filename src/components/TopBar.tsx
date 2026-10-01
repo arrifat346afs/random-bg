@@ -19,6 +19,7 @@ import { Separator } from '@/components/ui/separator'
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -32,6 +33,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Switch } from '@/components/ui/switch'
+import { SIZE_PRESETS } from '@/lib/schema'
 import {
   Undo2,
   Redo2,
@@ -45,8 +48,7 @@ import {
   ChevronDown,
   Bug,
   Copy,
-  Lock,
-  LockOpen,
+  Ratio,
 } from 'lucide-react'
 
 interface Props {
@@ -196,24 +198,69 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
 
       {/* headline actions */}
       <div className="flex items-center gap-1">
-        <Tip
-          label={
-            lockAspect
-              ? `Aspect locked — Randomise keeps ${project.canvas.w}×${project.canvas.h}`
-              : 'Aspect unlocked — Randomise rolls a new canvas size each press'
-          }
-        >
-          <Button
-            size="sm"
-            variant={lockAspect ? 'secondary' : 'ghost'}
-            onClick={() => setLockAspect(!lockAspect)}
-            aria-pressed={lockAspect}
-            aria-label={lockAspect ? 'Unlock canvas aspect ratio' : 'Lock canvas aspect ratio'}
-            className="px-1.5"
-          >
-            {lockAspect ? <Lock /> : <LockOpen />}
-          </Button>
-        </Tip>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="gap-1 px-1.5 tabular-nums"
+              aria-label="Canvas size and aspect ratio"
+              title="Canvas size"
+            >
+              <Ratio className="h-3.5 w-3.5 shrink-0 opacity-70" />
+              <span className="hidden text-[11px] md:inline">
+                {project.canvas.w}×{project.canvas.h}
+              </span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-60">
+            <DropdownMenuLabel>Canvas size</DropdownMenuLabel>
+
+            {/* The toggle is phrased as the action it performs. Off — the
+                default — keeps the current w×h on every Randomise; on rolls a
+                new shape each press. Stored as `lockAspect`, hence the
+                negation here. */}
+            <div className="flex items-center justify-between gap-3 px-2 py-1.5">
+              <label
+                htmlFor="randomise-aspect"
+                className="cursor-pointer text-xs leading-tight"
+              >
+                Randomise aspect
+                <span className="block text-[10px] text-muted-foreground">
+                  {lockAspect ? 'Off — keeps the current size' : 'On — new ratio each roll'}
+                </span>
+              </label>
+              <Switch
+                id="randomise-aspect"
+                checked={!lockAspect}
+                onCheckedChange={(v) => setLockAspect(!v)}
+              />
+            </div>
+
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Presets</DropdownMenuLabel>
+            {SIZE_PRESETS.map((s) => {
+              const active = project.canvas.w === s.w && project.canvas.h === s.h
+              return (
+                <DropdownMenuItem
+                  key={s.label}
+                  onSelect={() =>
+                    patchProject((p) => ({ ...p, canvas: { ...p.canvas, w: s.w, h: s.h } }))
+                  }
+                  className="flex items-center justify-between gap-2"
+                >
+                  <span className={active ? 'font-medium text-foreground' : undefined}>
+                    {s.label}
+                  </span>
+                  <span className="text-[10px] tabular-nums text-muted-foreground">
+                    {s.w}×{s.h}
+                  </span>
+                </DropdownMenuItem>
+              )
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
+
         <Button
           size="sm"
           variant="outline"

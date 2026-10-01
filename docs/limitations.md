@@ -63,10 +63,13 @@ Two rules the SVG backend follows because of this table:
   and a 4K roll costs ~4× the pixels, which would blow the budget and silently
   degrade randomise to a single ungated roll. Use a size preset for 4K.
 - **The aspect lock is on by default**, so Randomise keeps the current w×h
-  unless you unlock it (lock button beside Randomise). This matches
-  `mutateProject` and `breed`, which inherit the canvas via `structuredClone` —
-  Randomise was the only path that reshaped it. The lock applies to the ungated
-  fallback roll too, not just the gated one.
+  unless you switch it on. The canvas-size dropdown beside Randomise in the top
+  bar holds both the "Randomise aspect" switch and the size presets, so changing
+  the aspect ratio is one click from the button that would otherwise change it
+  for you. The bottom strip's `w×h` readout and Settings → Canvas are the other
+  two routes. This matches `mutateProject` and `breed`, which inherit the canvas
+  via `structuredClone` — Randomise was the only path that reshaped it. The lock
+  applies to the ungated fallback roll too, not just the gated one.
 - **White-out comes from inside the generators.** `emitters` and `streaks`
   composite their trails with node-level `screen` blending, so a dense roll
   saturates to white *within the layer*, regardless of the layer's own blend

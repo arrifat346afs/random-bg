@@ -239,9 +239,13 @@ function ProjectStrip({
         <span className="hidden max-w-[8rem] truncate sm:inline">{project.name}</span>
       </button>
       <Separator orientation="vertical" className="hidden h-4 sm:block" />
-      <span className="shrink-0 tabular-nums">
+      <button
+        onClick={onOpenSettings}
+        className="shrink-0 rounded tabular-nums hover:text-foreground"
+        title="Canvas size (,)"
+      >
         {project.canvas.w}×{project.canvas.h}
-      </span>
+      </button>
       <Separator orientation="vertical" className="hidden h-4 sm:block" />
       <span className="hidden shrink-0 sm:inline">bg: {project.canvas.bg.kind}</span>
       <div className="min-w-0 flex-1" />
