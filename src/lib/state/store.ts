@@ -8,6 +8,17 @@
 
 import { createProject, cloneProject, ensurePaletteLinks } from '../project'
 import { layerOffset, type Layer, type Project } from '../schema'
+import { KEYS, loadJSON, saveJSON } from './persistence'
+import {
+  HISTORY_LIMIT,
+  nextCursor,
+  pushPast,
+  redoTarget,
+  shouldCoalesce,
+  undoTarget,
+  type CommitPolicy,
+  type HistoryCursor,
+} from './history'
 import { getPreset } from '../presets'
 import type { LayerResult } from '../pipeline'
 
@@ -63,34 +74,6 @@ export interface AppState {
   inspectorTab: 'params' | 'distribute' | 'colour' | 'effects'
   leftSheet: boolean
   rightSheet: boolean
-}
-
-const HISTORY_LIMIT = 80
-
-function loadJSON<T>(key: string): T | null {
-  try {
-    const raw = localStorage.getItem(key)
-    if (!raw) return null
-    return JSON.parse(raw) as T
-  } catch {
-    return null
-  }
-}
-
-function saveJSON(key: string, value: unknown): boolean {
-  try {
-    localStorage.setItem(key, JSON.stringify(value))
-    return true
-  } catch {
-    return false
-  }
-}
-
-const KEYS = {
-  project: 'fx-forge:project:v1',
-  presets: 'fx-forge:presets:v1',
-  theme: 'fx-forge:theme',
-  view: 'fx-forge:view',
 }
 
 function initialProject(): Project {
@@ -183,16 +166,14 @@ export function setState(patch: Partial<AppState> | ((s: AppState) => Partial<Ap
 
 /* ---- History ------------------------------------------------------------- */
 
-interface CommitOpts {
-  /** coalescing key: repeated commits with the same key collapse into one */
-  coalesce?: string
-  /** skip history entirely (e.g. loading a project) */
-  silent?: boolean
+/** Store-facing commit options: the history policy plus a selection change. */
+interface CommitOpts extends CommitPolicy {
   /** select a layer after the commit */
   select?: string | null
 }
 
-let lastCoalesce: { key: string; at: number } | null = null
+const NO_CURSOR: HistoryCursor = { key: null, at: 0 }
+let lastCoalesce: HistoryCursor = NO_CURSOR
 
 export function commit(next: Project, opts: CommitOpts = {}): void {
   const now = Date.now()
@@ -200,18 +181,10 @@ export function commit(next: Project, opts: CommitOpts = {}): void {
   let future = state.future
 
   if (!opts.silent) {
-    const merge =
-      opts.coalesce &&
-      lastCoalesce &&
-      lastCoalesce.key === opts.coalesce &&
-      now - lastCoalesce.at < 900 &&
-      past.length > 0
-    if (!merge) {
-      past = [...past, cloneProject(state.project)]
-      if (past.length > HISTORY_LIMIT) past = past.slice(past.length - HISTORY_LIMIT)
-    }
+    const merged = shouldCoalesce(lastCoalesce, opts.coalesce, now, past.length === 0)
+    if (!merged) past = pushPast(past, state.project)
     future = []
-    lastCoalesce = opts.coalesce ? { key: opts.coalesce, at: now } : null
+    lastCoalesce = nextCursor(lastCoalesce, opts, merged, now)
   }
 
   state = {
@@ -242,32 +215,39 @@ export function canRedo(): boolean {
 }
 
 export function undo(): void {
-  if (!state.past.length) return
-  const prev = state.past[state.past.length - 1]
-  const past = state.past.slice(0, -1)
+  const target = undoTarget(state.past)
+  if (!target || !target.project) return
+  const prev = target.project
   const future = [cloneProject(state.project), ...state.future].slice(0, HISTORY_LIMIT)
   state = {
     ...state,
     project: prev,
-    past,
+    past: target.past,
     future,
     version: state.version + 1,
+    // Keep the selection if that layer survived the undo, else fall back to the
+    // top of the restored stack rather than pointing at nothing.
     selectedLayerId: prev.layers.some((l) => l.id === state.selectedLayerId)
       ? state.selectedLayerId
       : (prev.layers[0]?.id ?? null),
   }
-  lastCoalesce = null
+  lastCoalesce = NO_CURSOR
   emit()
   scheduleAutosave()
 }
 
 export function redo(): void {
-  if (!state.future.length) return
-  const next = state.future[0]
-  const future = state.future.slice(1)
+  const target = redoTarget(state.future)
+  if (!target || !target.project) return
   const past = [...state.past, cloneProject(state.project)].slice(-HISTORY_LIMIT)
-  state = { ...state, project: next, past, future, version: state.version + 1 }
-  lastCoalesce = null
+  state = {
+    ...state,
+    project: target.project,
+    past,
+    future: target.future,
+    version: state.version + 1,
+  }
+  lastCoalesce = NO_CURSOR
   emit()
   scheduleAutosave()
 }

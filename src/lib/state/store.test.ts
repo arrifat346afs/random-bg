@@ -85,6 +85,27 @@ describe('history', () => {
     expect(canRedo()).toBe(true)
   })
 
+  test('a multi-step redo replays in order', () => {
+    // Guards the redo stack's ordering. With only one entry in `future`, the
+    // front and the back are the same element, so a reversed implementation
+    // still passes a single-undo test.
+    //
+    // `past` stores the snapshot taken *before* each commit, and `future` is
+    // built newest-undo-first, so redo walks back forward in order.
+    commit({ ...getState().project, name: 'a' })
+    commit({ ...getState().project, name: 'b' })
+    commit({ ...getState().project, name: 'c' })
+    undo()
+    undo()
+    expect(getState().project.name).toBe('a')
+    expect(getState().future.map((p) => p.name)).toEqual(['b', 'c'])
+    redo()
+    expect(getState().project.name).toBe('b')
+    redo()
+    expect(getState().project.name).toBe('c')
+    expect(canRedo()).toBe(false)
+  })
+
   test('a new commit clears the redo stack', () => {
     commit({ ...getState().project, name: 'a' })
     undo()
