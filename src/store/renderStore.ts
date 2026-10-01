@@ -11,7 +11,7 @@
  */
 
 import { create } from 'zustand'
-import type { LayerResult } from '../pipeline'
+import type { LayerResult } from '../lib/pipeline'
 
 export interface Progress {
   done: number

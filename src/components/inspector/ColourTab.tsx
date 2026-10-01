@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Link2, Unlink } from "lucide-react"
-import { useProjectStore } from '@/lib/state/projectStore'
+import { useProjectStore } from '@/store/projectStore'
 
 export function ColourTab({ layer }: { layer: Layer }) {
   const projectPalette = useProjectStore((s) => s.project.palette)

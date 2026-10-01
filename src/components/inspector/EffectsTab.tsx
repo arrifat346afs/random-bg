@@ -3,7 +3,6 @@
  * applied after a layer generates.
  */
 
-import { useState } from "react"
 import { MODIFIER_DEFS } from "@/lib/modifiers"
 import { effectivePalette } from "@/lib/palette"
 import { createRng } from "@/lib/rng"
@@ -23,10 +22,12 @@ import {
   Trash2,
 } from "lucide-react"
 import { MiniToggle, ModSlider } from "./fields"
-import { useProjectStore } from '@/lib/state/projectStore'
+import { useProjectStore } from '@/store/projectStore'
+import { useUiStore } from '@/store/uiStore'
 
 export function EffectsTab({ layer }: { layer: Layer }) {
-  const [addOpen, setAddOpen] = useState(false)
+  const addOpen = useUiStore((s) => s.modifierPickerOpen)
+  const setAddOpen = (v: boolean) => useUiStore.getState().setModifierPickerOpen(v)
 
   const setMod = (index: number, patch: Partial<Layer['mods'][number]>) =>
     useProjectStore.getState().updateLayer(layer.id, (l) => {
@@ -114,7 +115,7 @@ export function EffectsTab({ layer }: { layer: Layer }) {
       <div>
         <div className="mb-1.5 flex items-center justify-between">
           <Label className="text-xs uppercase tracking-wide text-muted-foreground">Modifiers</Label>
-          <Button size="sm" variant="secondary" onClick={() => setAddOpen((v) => !v)}>
+          <Button size="sm" variant="secondary" onClick={() => setAddOpen(!addOpen)}>
             <Plus /> Add
           </Button>
         </div>

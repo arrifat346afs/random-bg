@@ -8,7 +8,7 @@
 
 import { Component, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
-import { KEYS } from '@/lib/state/persistence'
+import { KEYS } from '@/store/persistence'
 
 interface State {
   error: Error | null

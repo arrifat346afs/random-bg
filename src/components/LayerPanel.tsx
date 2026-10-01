@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
+import { useUiStore } from '@/store/uiStore'
 import {
   DndContext,
   KeyboardSensor,
@@ -47,7 +48,7 @@ import {
   Ungroup,
   Group as GroupIcon,
 } from 'lucide-react'
-import { useProjectStore } from '@/lib/state/projectStore'
+import { useProjectStore } from '@/store/projectStore'
 
 /* ---- block model ----------------------------------------------------------
  * A "block" is either a single ungrouped layer or a contiguous run of layers
@@ -85,7 +86,8 @@ export function LayerPanel() {
   const groups = useProjectStore((s) => s.project.groups)
   const selectedId = useProjectStore((s) => s.selectedLayerId)
   /** shift/cmd-clicked layers awaiting a group action */
-  const [multi, setMulti] = useState<string[]>([])
+  const multi = useUiStore((s) => s.multiSelect)
+  const setMulti = (ids: string[]) => useUiStore.getState().setMultiSelect(ids)
 
   const blocks = useMemo(() => toBlocks(layers, groups), [layers, groups])
   const sensors = useSensors(
@@ -213,7 +215,7 @@ export function LayerPanel() {
 
   const clickRow = (id: string, e: React.MouseEvent) => {
     if (e.shiftKey || e.metaKey || e.ctrlKey) {
-      setMulti((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+      setMulti(multi.includes(id) ? multi.filter((x) => x !== id) : [...multi, id])
     } else {
       setMulti([])
       useProjectStore.getState().selectLayer(id)

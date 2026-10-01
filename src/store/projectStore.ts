@@ -14,8 +14,8 @@
  */
 
 import { create } from 'zustand'
-import { cloneProject } from '../project'
-import { layerOffset, type Layer, type Project } from '../schema'
+import { cloneProject } from '../lib/project'
+import { layerOffset, type Layer, type Project } from '../lib/schema'
 import {
   nextCursor,
   pushPast,
@@ -29,8 +29,8 @@ import {
 import { KEYS, loadJSON, saveJSON } from './persistence'
 import { useRenderStore } from './renderStore'
 import { useUiStore } from './uiStore'
-import { getPreset } from '../presets'
-import { createProject, ensurePaletteLinks } from '../project'
+import { getPreset } from '../lib/presets'
+import { createProject, ensurePaletteLinks } from '../lib/project'
 
 /** Store-facing commit options: the history policy plus a selection change. */
 export interface CommitOpts extends CommitPolicy {

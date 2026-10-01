@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { PRESETS, ALL_PRESET_TAGS, buildPreset, type PresetDef } from '@/lib/presets'
 import { getGenerator } from '@/lib/generators'
 import { PRESET_PALETTES } from '@/lib/palette'
@@ -15,9 +15,10 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Search, Trash2, Save, Sparkles, ImageOff, FolderOpen } from 'lucide-react'
-import { useRenderStore } from '@/lib/state/renderStore'
-import { useLibraryStore } from '@/lib/state/libraryStore'
-import { useProjectStore } from '@/lib/state/projectStore'
+import { useRenderStore } from '@/store/renderStore'
+import { useLibraryStore } from '@/store/libraryStore'
+import { useUiStore } from '@/store/uiStore'
+import { useProjectStore } from '@/store/projectStore'
 
 interface Props {
   open: boolean
@@ -27,8 +28,10 @@ interface Props {
 /** Searchable, tagged browser for the 38 built-in presets + user presets. */
 export function PresetBrowser({ open, onOpenChange }: Props) {
   const userPresets = useLibraryStore((s) => s.userPresets)
-  const [q, setQ] = useState('')
-  const [tag, setTag] = useState<string | null>(null)
+  const q = useUiStore((s) => s.presetQuery)
+  const tag = useUiStore((s) => s.presetTag)
+  const setQ = (v: string) => useUiStore.getState().setPresetQuery(v)
+  const setTag = (v: string | null) => useUiStore.getState().setPresetTag(v)
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase()

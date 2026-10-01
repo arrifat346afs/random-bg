@@ -14,8 +14,8 @@ import { DistributeTab } from './inspector/DistributeTab'
 import { EffectsTab } from './inspector/EffectsTab'
 import { ParamsTab } from './inspector/ParamsTab'
 import { LayerHeader } from './inspector/LayerHeader'
-import { useProjectStore } from '@/lib/state/projectStore'
-import { useUiStore } from '@/lib/state/uiStore'
+import { useProjectStore } from '@/store/projectStore'
+import { useUiStore } from '@/store/uiStore'
 
 const EMPTY = (
   <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">

@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import {
   MAX_EXPORT_DIM,
   MAX_EXPORT_PIXELS,
@@ -35,8 +34,9 @@ import {
   Check,
   AlertTriangle,
 } from 'lucide-react'
-import { useProjectStore } from '@/lib/state/projectStore'
-import { useRenderStore } from '@/lib/state/renderStore'
+import { useProjectStore } from '@/store/projectStore'
+import { useRenderStore } from '@/store/renderStore'
+import { useUiStore } from '@/store/uiStore'
 
 interface Props {
   open: boolean
@@ -55,33 +55,41 @@ const FORMATS: { value: ExportFormat; label: string; icon: React.ReactNode; hint
 export function ExportDialog({ open, onOpenChange }: Props) {
   const project = useProjectStore((s) => s.project)
   const results = useRenderStore((s) => s.results)
-  const [format, setFormat] = useState<ExportFormat>('png')
-  const [scale, setScale] = useState(2)
-  const [quality, setQuality] = useState(0.92)
-  const [includeBg, setIncludeBg] = useState(false)
-  const [flatten, setFlatten] = useState(false)
-  const [seconds, setSeconds] = useState(4)
-  const [busy, setBusy] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [status, setStatus] = useState<{ kind: 'ok' | 'warn'; msg: string } | null>(null)
-  const [fallback, setFallback] = useState<{
+  const format = useUiStore((s) => s.exportFormat)
+  const scale = useUiStore((s) => s.exportScale)
+  const quality = useUiStore((s) => s.exportQuality)
+  const includeBg = useUiStore((s) => s.exportIncludeBg)
+  const flatten = useUiStore((s) => s.exportFlatten)
+  const seconds = useUiStore((s) => s.exportSeconds)
+  const busy = useUiStore((s) => s.exportBusy)
+  const progress = useUiStore((s) => s.exportProgress)
+  const status = useUiStore((s) => s.exportStatus)
+  const fallback = useUiStore((s) => s.exportFallback)
+  const epoch = useUiStore((s) => s.exportEpoch)
+  const setFormat = (f: ExportFormat) => useUiStore.getState().patchExport({ exportFormat: f })
+  const setScale = (n: number) => useUiStore.getState().patchExport({ exportScale: n })
+  const setQuality = (n: number) => useUiStore.getState().patchExport({ exportQuality: n })
+  const setIncludeBg = (n: boolean) =>
+    useUiStore.getState().patchExport({ exportIncludeBg: n })
+  const setFlatten = (n: boolean) => useUiStore.getState().patchExport({ exportFlatten: n })
+  const setSeconds = (n: number) => useUiStore.getState().patchExport({ exportSeconds: n })
+  const setBusy = (n: boolean) => useUiStore.getState().patchExport({ exportBusy: n })
+  const setProgress = (n: number) => useUiStore.getState().patchExport({ exportProgress: n })
+  const setStatus = (v: { kind: 'ok' | 'warn'; msg: string } | null) =>
+    useUiStore.getState().patchExport({ exportStatus: v })
+  const setFallback = (v: {
     title: string
     body: string
     url?: string
     copyLabel?: string
     copy?: () => Promise<boolean>
-  } | null>(null)
+  } | null) => useUiStore.getState().patchExport({ exportFallback: v })
 
   // Clear the previous result as soon as the dialog re-opens or the format
-  // changes — done while rendering so no stale toast leaks between opens.
-  const [prevKey, setPrevKey] = useState(`${open}:${format}`)
+  // changes — done while rendering so no stale toast leaks between opens. The
+  // store holds the last epoch, which is this render-phase check's memory.
   const resetKey = `${open}:${format}`
-  if (prevKey !== resetKey) {
-    setPrevKey(resetKey)
-    if (status) setStatus(null)
-    if (fallback) setFallback(null)
-    if (progress) setProgress(0)
-  }
+  if (epoch !== resetKey) useUiStore.getState().resetExportTransient(resetKey)
 
   // --- dimension guard ---------------------------------------------------
   const px = project.canvas.w * project.canvas.h * scale * scale
@@ -438,7 +446,8 @@ function FallbackBox({
   copyLabel?: string
   copy?: () => Promise<boolean>
 }) {
-  const [copied, setCopied] = useState(false)
+  const copied = useUiStore((s) => s.exportCopied)
+  const setCopied = (ok: boolean) => useUiStore.getState().patchExport({ exportCopied: ok })
   return (
     <div className="rounded-lg border border-dashed p-3 text-xs">
       <p className="mb-1 flex items-center gap-1.5 font-semibold">

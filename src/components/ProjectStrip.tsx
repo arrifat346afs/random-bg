@@ -9,9 +9,9 @@ import { PanelLeft, PanelRight, Settings2 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
-import { useProjectStore } from '@/lib/state/projectStore'
-import { useRenderStore } from '@/lib/state/renderStore'
-import { useUiStore } from '@/lib/state/uiStore'
+import { useProjectStore } from '@/store/projectStore'
+import { useRenderStore } from '@/store/renderStore'
+import { useUiStore } from '@/store/uiStore'
 
 interface Props {
   onOpenSettings: () => void

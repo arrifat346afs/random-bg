@@ -16,7 +16,7 @@ import {
   shouldCoalesce,
   undoTarget,
 } from './history'
-import { createProject, cloneProject } from '../project'
+import { createProject, cloneProject } from '../lib/project'
 
 const proj = (name: string) => ({ ...createProject({ seed: 1, layers: ['smoke'] }), name })
 const cursor = (key: string | null, at: number) => ({ key, at })

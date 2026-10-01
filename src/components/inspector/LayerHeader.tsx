@@ -3,7 +3,6 @@
  * per-layer blend, above the tab strip.
  */
 
-import { useState } from "react"
 import { getGenerator } from "@/lib/generators"
 import { BLEND_MODES, type BlendMode } from "@/lib/ir"
 import type { Layer } from "@/lib/schema"
@@ -20,14 +19,19 @@ import {
 } from "@/components/ui/select"
 import { Eye, EyeOff, Lock, LockOpen } from "lucide-react"
 import { MiniToggle } from "./fields"
-import { useProjectStore } from '@/lib/state/projectStore'
+import { useProjectStore } from '@/store/projectStore'
 
+import { useUiStore } from '@/store/uiStore'
 /* ---- header --------------------------------------------------------------- */
 
 export function LayerHeader({ layer }: { layer: Layer }) {
   const gen = getGenerator(layer.gen)
-  const [renaming, setRenaming] = useState(false)
-  const [draft, setDraft] = useState(layer.name)
+  const renaming = useUiStore((s) => s.renamingLayer)
+  const draft = useUiStore((s) => s.renameDraft)
+  const ui = () => useUiStore.getState()
+  const setDraft = (v: string) => ui().setRenameDraft(v)
+  // entering rename mode seeds the draft with the current name
+  const setRenaming = (v: boolean, seed?: string) => ui().setRenamingLayer(v, seed)
 
   const toggle = (key: 'visible' | 'locked' | 'solo') =>
     useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, [key]: !l[key] }))
@@ -59,7 +63,7 @@ export function LayerHeader({ layer }: { layer: Layer }) {
               className="block w-full truncate text-left text-sm font-semibold hover:text-primary"
               onDoubleClick={() => {
                 setDraft(layer.name)
-                setRenaming(true)
+                setRenaming(true, layer.name)
               }}
               title="Double-click to rename"
             >

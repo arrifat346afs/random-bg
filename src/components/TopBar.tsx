@@ -1,7 +1,6 @@
-import { useState } from 'react'
 import { formatSeed, parseSeed, randomSeedString } from '@/lib/rng'
 import { mutateProject, variations, breed } from '@/lib/randomize'
-import { randomise } from '@/lib/state/randomise'
+import { randomise } from '@/store/randomise'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
@@ -39,9 +38,9 @@ import {
   Copy,
   Ratio,
 } from 'lucide-react'
-import { useProjectStore } from '@/lib/state/projectStore'
-import { useRenderStore } from '@/lib/state/renderStore'
-import { useUiStore } from '@/lib/state/uiStore'
+import { useProjectStore } from '@/store/projectStore'
+import { useRenderStore } from '@/store/renderStore'
+import { useUiStore } from '@/store/uiStore'
 
 interface Props {
   onOpenPresets: () => void
@@ -58,19 +57,21 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
   const canUndoNow = useProjectStore((s) => s.past.length > 0)
   const canRedoNow = useProjectStore((s) => s.future.length > 0)
   const storageOk = useUiStore((s) => s.storageAvailable)
-  const [seedDraft, setSeedDraft] = useState(() => formatSeed(project.seed))
-  const [showSeed, setShowSeed] = useState(false)
-
-  // Keep the seed field in sync when the seed changes elsewhere (randomise,
-  // undo, preset load) — adjusted while rendering rather than in an effect.
-  const [prevSeed, setPrevSeed] = useState(project.seed)
-  if (prevSeed !== project.seed) {
-    setPrevSeed(project.seed)
-    setSeedDraft(formatSeed(project.seed))
-  }
+  const seedDraft = useUiStore((s) => s.seedDraft)
+  const showSeed = useUiStore((s) => s.showSeed)
   // the gated roll runs off-thread but still takes a moment; keep the button
   // honest about it and stop a second press queueing a second gate
-  const [rolling, setRolling] = useState(false)
+  const rolling = useUiStore((s) => s.rolling)
+  const ui = () => useUiStore.getState()
+
+  // Seed the draft from the committed seed on first read, then keep it in sync
+  // when the seed changes elsewhere (randomise, undo, preset load). The
+  // `seedDraft === ''` check is the "not yet initialised" sentinel: once the
+  // user types, an unrelated seed change must not clobber their text unless the
+  // field has focus, which the input handles on its own.
+  if (seedDraft === '' && project.seed !== undefined) {
+    ui().setSeedDraft(formatSeed(project.seed))
+  }
 
   const applySeed = (raw: string) => {
     const s = parseSeed(raw)
@@ -80,11 +81,11 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
   const stepSeed = (delta: number) => applySeed(String(((project.seed + delta) >>> 0) || 1))
 
   const doRandomize = async () => {
-    setRolling(true)
+    ui().setRolling(true)
     try {
       await randomise()
     } finally {
-      setRolling(false)
+      ui().setRolling(false)
     }
   }
   const doMutate = () => useProjectStore.getState().applyProject(mutateProject(useProjectStore.getState().project, 0.18))
@@ -145,11 +146,11 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
           <input
             value={seedDraft}
             aria-label="Seed"
-            onChange={(e) => setSeedDraft(e.target.value)}
+            onChange={(e) => ui().setSeedDraft(e.target.value)}
             onBlur={(e) => applySeed(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') applySeed(seedDraft)
-              if (e.key === 'Escape') setSeedDraft(formatSeed(project.seed))
+              if (e.key === 'Escape') ui().setSeedDraft(formatSeed(project.seed))
             }}
             className="h-full w-[112px] bg-transparent text-center font-mono text-[11px] tabular-nums outline-none"
           />
@@ -177,7 +178,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
             variant="ghost"
             aria-label="Copy seed"
             onClick={() => {
-              setShowSeed(true)
+              ui().setShowSeed(true)
               void navigator.clipboard?.writeText(String(project.seed)).catch(() => {})
             }}
           >
@@ -363,7 +364,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
         )}
       </div>
 
-      <SeedDialog open={showSeed} onClose={() => setShowSeed(false)} seed={project.seed} />
+      <SeedDialog open={showSeed} onClose={() => ui().setShowSeed(false)} seed={project.seed} />
     </header>
   )
 }

@@ -19,7 +19,7 @@ import {
 import { Info, Shuffle } from "lucide-react"
 import { DIST_FIELDS, SHAPE_FIELDS } from "./schema"
 import { DistNumField, MaskPicker } from "./fields"
-import { useProjectStore } from '@/lib/state/projectStore'
+import { useProjectStore } from '@/store/projectStore'
 
 export function DistributeTab({ layer }: { layer: Layer }) {
   const rng = createRng(hash32(useProjectStore.getState().project.seed, layer.id, layer.seedOffset, 'dist'))

@@ -15,7 +15,7 @@ import { clearStorage } from './testSetup'
 import { canRedo, canUndo, selectedLayer, useProjectStore } from './projectStore'
 import { useRenderStore } from './renderStore'
 import { useUiStore } from './uiStore'
-import { createProject } from '../project'
+import { createProject } from '../lib/project'
 
 /**
  * Zustand stores are singletons with no reset API, so each test resets the

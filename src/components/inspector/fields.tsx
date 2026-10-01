@@ -7,7 +7,6 @@
  * Effects.
  */
 
-import { useState } from 'react'
 import { renderMaskDataURL } from '@/lib/mask'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -22,6 +21,7 @@ import {
 } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { DistField } from './schema'
+import { useUiStore } from '@/store/uiStore'
 
 export function MiniToggle({
   active,
@@ -124,9 +124,13 @@ export function DistNumField({
 }
 
 export function MaskPicker({ value, onChange }: { value?: string; onChange: (v: string) => void }) {
-  const [kind, setKind] = useState<'radial' | 'linear'>('radial')
-  const [angle, setAngle] = useState(90)
-  const [busy, setBusy] = useState(false)
+  const kind = useUiStore((s) => s.maskKind)
+  const angle = useUiStore((s) => s.maskAngle)
+  const busy = useUiStore((s) => s.maskBusy)
+  const ui = () => useUiStore.getState()
+  const setKind = (v: 'radial' | 'linear') => ui().patchMask({ kind: v })
+  const setAngle = (v: number) => ui().patchMask({ angle: v })
+  const setBusy = (v: boolean) => ui().patchMask({ busy: v })
 
   const paint = () => {
     setBusy(true)

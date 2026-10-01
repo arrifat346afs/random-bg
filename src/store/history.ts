@@ -9,8 +9,8 @@
  * which is what makes "undo anything, including randomise" work for free.
  */
 
-import type { Project } from '../schema'
-import { cloneProject } from '../project'
+import type { Project } from '../lib/schema'
+import { cloneProject } from '../lib/project'
 
 /** Depth of the undo stack. Oldest entries fall off the bottom. */
 export const HISTORY_LIMIT = 80

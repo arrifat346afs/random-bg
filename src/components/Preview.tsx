@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { type IR } from '@/lib/ir'
 import { drawBackground, drawIR } from '@/lib/render/canvas'
 import { composeIR } from '@/lib/pipeline'
@@ -10,9 +10,9 @@ import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Maximize2, Minus, Plus, Layers } from 'lucide-react'
-import { useProjectStore } from '@/lib/state/projectStore'
-import { useRenderStore } from '@/lib/state/renderStore'
-import { useUiStore } from '@/lib/state/uiStore'
+import { useProjectStore } from '@/store/projectStore'
+import { useRenderStore } from '@/store/renderStore'
+import { useUiStore } from '@/store/uiStore'
 
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 8
@@ -31,9 +31,23 @@ const RASTER_TOLERANCE = 0.05
 const RASTER_REFINE_MS = 180
 
 export function Preview() {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [size, setSize] = useState({ w: 0, h: 0 })
+  const ui = () => useUiStore.getState()
+  // Element handles live in the store but are read fresh at each use site via
+  // getState(). Capturing them into a local ref object at render time would
+  // snapshot a stale value, since the store is filled by the ref callbacks after
+  // this render.
+  /**
+   * The stage element, read fresh on each use.
+   *
+   * This cannot be a `useRef` snapshot taken during render: the ref callback
+   * populates the store *after* this render, so a captured handle would still be
+   * null when the wheel handler first runs. Reading on use gets the live value.
+   */
+  const stageEl = () => useUiStore.getState().stageRef
+  const canvasEl = () => useUiStore.getState().canvasRef
+  // Stage size comes from the ResizeObserver; the stage element handle itself is
+  // in the store but read via getState() so nothing subscribes to a DOM node.
+  const size = useUiStore((s) => s.stageSize)
 
   const zoom = useUiStore((s) => s.view.zoom)
   const panX = useUiStore((s) => s.view.panX)
@@ -64,13 +78,13 @@ export function Preview() {
 
   /* observe container size */
   useEffect(() => {
-    const el = containerRef.current
+    const el = stageEl()
     if (!el) return
     const ro = new ResizeObserver(() => {
-      setSize({ w: el.clientWidth, h: el.clientHeight })
+      ui().setStageSize({ w: el.clientWidth, h: el.clientHeight })
     })
     ro.observe(el)
-    setSize({ w: el.clientWidth, h: el.clientHeight })
+    useUiStore.getState().setStageSize({ w: el.clientWidth, h: el.clientHeight })
     return () => ro.disconnect()
   }, [])
 
@@ -91,13 +105,10 @@ export function Preview() {
 
   /* ---- raster cache + draw ---------------------------------------------- */
 
-  const rasterRef = useRef<HTMLCanvasElement | null>(null)
-  const rasterMeta = useRef<{ key: string; unit: number; ir: IR } | null>(null)
-  const refineTimer = useRef<number | null>(null)
-  const [refine, bump] = useReducer((n: number) => n + 1, 0)
+  const refine = useUiStore((s) => s.refineTick)
 
   useEffect(() => {
-    const cvs = canvasRef.current
+    const cvs = canvasEl()
     if (!cvs || !size.w || !size.h) return
     const dpr = Math.min(3, window.devicePixelRatio || 1)
     const pw = Math.round(size.w * dpr)
@@ -128,9 +139,11 @@ export function Preview() {
     }
 
     const contentKey = `${resultsVersion}|${ir.w}x${ir.h}`
-    const meta = rasterMeta.current
-    const contentStale =
-      !meta || !rasterRef.current || meta.key !== contentKey || meta.ir !== ir
+    // Read through getState(): these hold DOM nodes and cache metadata, and
+    // selecting them would re-render the stage on every cache write.
+    const meta = ui().rasterMeta
+    const cached = ui().rasterCanvas
+    const contentStale = !meta || !cached || meta.key !== contentKey || meta.ir !== ir
 
     // resolution the raster *should* have for this zoom (capped for memory)
     let unit = scale * dpr
@@ -143,10 +156,10 @@ export function Preview() {
       meta !== null && !contentStale && Math.abs(meta.unit - unit) > unit * RASTER_TOLERANCE
 
     if (contentStale) {
-      let r = rasterRef.current
+      let r = cached
       if (!r) {
         r = document.createElement('canvas')
-        rasterRef.current = r
+        ui().setRefs({ rasterCanvas: r })
       }
       const w = Math.max(1, Math.round(ir.w * unit))
       const h = Math.max(1, Math.round(ir.h * unit))
@@ -158,26 +171,29 @@ export function Preview() {
         rc.clearRect(0, 0, w, h)
         rc.setTransform(unit, 0, 0, unit, 0, 0)
         drawIR(rc, ir, 1)
-        rasterMeta.current = { key: contentKey, unit, ir }
+        ui().setRasterMeta({ key: contentKey, unit, ir })
       }
     } else if (unitStale) {
       // zoom moved on: show the existing raster stretched (free) and sharpen
       // it once the user stops
-      if (refineTimer.current) clearTimeout(refineTimer.current)
-      refineTimer.current = window.setTimeout(() => {
-        refineTimer.current = null
-        bump()
-      }, RASTER_REFINE_MS)
+      if (ui().refineTimer) clearTimeout(ui().refineTimer as number)
+      ui().setRefineTimer(
+        window.setTimeout(() => {
+          ui().setRefineTimer(null)
+          ui().bumpRefine()
+        }, RASTER_REFINE_MS),
+      )
     }
 
-    const r = rasterRef.current
+    const r = ui().rasterCanvas
     if (r && r.width) ctx.drawImage(r, dx, dy, dw, dh)
   }, [ir, view, resultsVersion, size.w, size.h, canvas.bg, canvas.w, canvas.h, refine])
 
   // clear the pending sharpen on unmount only — each draw re-arms its own
   useEffect(
     () => () => {
-      if (refineTimer.current) clearTimeout(refineTimer.current)
+      const t = useUiStore.getState().refineTimer
+      if (t) clearTimeout(t)
     },
     [],
   )
@@ -194,7 +210,7 @@ export function Preview() {
     (e: React.WheelEvent) => {
       e.preventDefault()
       const s = useUiStore.getState().view
-      const rect = containerRef.current?.getBoundingClientRect()
+      const rect = stageEl()?.getBoundingClientRect()
       if (!rect) return
       const mx = e.clientX - rect.left - rect.width / 2
       const my = e.clientY - rect.top - rect.height / 2
@@ -210,24 +226,11 @@ export function Preview() {
     [applyView],
   )
 
-  const dragRef = useRef<{
-    id: number
-    mode: 'pan' | 'move'
-    x: number
-    y: number
-    px: number
-    py: number
-    /** IR-unit start offset of the layer being moved */
-    ox: number
-    oy: number
-    moved: boolean
-  } | null>(null)
-
   /** Screen (client) point → IR units. Null when the stage has no transform yet. */
   const toIR = useCallback(
     (clientX: number, clientY: number) => {
       if (!view) return null
-      const rect = containerRef.current?.getBoundingClientRect()
+      const rect = stageEl()?.getBoundingClientRect()
       if (!rect) return null
       return {
         x: (clientX - rect.left - view.ox) / view.scale,
@@ -246,7 +249,7 @@ export function Preview() {
       if (!space && !middle) {
         // Plain left-press on the artwork selects the topmost layer under the
         // cursor and starts a move; empty stage still deselects.
-        if (e.target !== canvasRef.current) return
+        if (e.target !== canvasEl()) return
         const p = toIR(e.clientX, e.clientY)
         const rs = useRenderStore.getState().results
         const hit = p && rs ? hitTestLayers(rs, s.project, p.x, p.y) : null
@@ -254,7 +257,7 @@ export function Preview() {
         const layer = hit ? s.project.layers.find((l) => l.id === hit) : undefined
         if (!hit || !layer || layer.locked || !p || !view) return
         const { x, y } = layerOffset(layer)
-        dragRef.current = {
+        ui().setStageDrag({
           id: e.pointerId,
           mode: 'move',
           x: e.clientX,
@@ -264,7 +267,7 @@ export function Preview() {
           ox: x,
           oy: y,
           moved: false,
-        }
+        })
         try {
           ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
         } catch {
@@ -273,7 +276,7 @@ export function Preview() {
         return
       }
       e.preventDefault()
-      dragRef.current = {
+      ui().setStageDrag({
         id: e.pointerId,
         mode: 'pan',
         x: e.clientX,
@@ -283,7 +286,7 @@ export function Preview() {
         ox: 0,
         oy: 0,
         moved: false,
-      }
+      })
       // capture keeps pointermove flowing when the cursor leaves the stage; it
       // throws if the pointer is already gone (coalesced pointercancel), which
       // must never break the interaction
@@ -298,7 +301,7 @@ export function Preview() {
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
-      const d = dragRef.current
+      const d = ui().stageDrag
       if (!d || d.id !== e.pointerId) return
       if (d.mode === 'pan') {
         applyView({ panX: d.px + (e.clientX - d.x), panY: d.py + (e.clientY - d.y) })
@@ -310,7 +313,7 @@ export function Preview() {
       const dx = (e.clientX - d.x) / view.scale
       const dy = (e.clientY - d.y) / view.scale
       if (!d.moved && Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return
-      d.moved = true
+      ui().setStageDrag({ ...d, moved: true })
       const id = selectedLayerId
       if (!id) return
       // transient during the gesture; one coalesced commit lands on release
@@ -326,13 +329,18 @@ export function Preview() {
 
   const onPointerUp = useCallback(
     (e: React.PointerEvent) => {
-      const d = dragRef.current
+      const d = ui().stageDrag
       if (d?.id !== e.pointerId) return
-      dragRef.current = null
-      // Collapse the whole gesture into a single undo entry
+      // Collapse the whole gesture into a single undo entry, before clearing the
+      // drag so `d` is still the gesture that ran.
       if (d.mode === 'move' && d.moved && selectedLayerId) {
-        useProjectStore.getState().commit(useProjectStore.getState().project, { coalesce: `move:${selectedLayerId}` })
+        useProjectStore
+          .getState()
+          .commit(useProjectStore.getState().project, {
+            coalesce: `move:${selectedLayerId}`,
+          })
       }
+      ui().setStageDrag(null)
     },
     [selectedLayerId],
   )
@@ -346,14 +354,15 @@ export function Preview() {
     [applyView],
   )
 
-  /* space-to-pan state (module-level so keydown anywhere works) */
-  const [, force] = useState(0)
+  /* space-to-pan: the held flag is module-level so keydown works anywhere, and
+     the store copy is what drives the grab cursor. */
+  const spaceHeld = useUiStore((s) => s.spaceHeld)
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.code === 'Space' && !isTyping(e)) {
         if (!isSpaceHeld()) {
           setSpaceHeld(true)
-          force((n) => n + 1)
+          useUiStore.getState().patchSpaceHeld(true)
         }
         e.preventDefault()
       }
@@ -361,7 +370,7 @@ export function Preview() {
     const up = (e: KeyboardEvent) => {
       if (e.code === 'Space') {
         setSpaceHeld(false)
-        force((n) => n + 1)
+        useUiStore.getState().patchSpaceHeld(false)
       }
     }
     window.addEventListener('keydown', down)
@@ -385,18 +394,18 @@ export function Preview() {
   return (
     <div className="relative flex min-h-0 flex-1 flex-col bg-stage">
       <div
-        ref={containerRef}
+        ref={(el) => ui().setRefs({ stageRef: el })}
         onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
         className={`relative min-h-0 flex-1 overflow-hidden ${checker ? 'checkerboard' : ''} ${
-          isSpaceHeld() ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
+          spaceHeld ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
         }`}
         style={{ touchAction: 'none' }}
       >
-        <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+        <canvas ref={(el) => ui().setRefs({ canvasRef: el })} className="absolute inset-0 h-full w-full" />
 
         {/* Selection box. Drawn in the same transform as the raster blit, so it
             tracks zoom and pan exactly. Geometry extent only — a glow's visible

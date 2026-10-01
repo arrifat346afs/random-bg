@@ -8,13 +8,14 @@
  */
 
 import { beforeEach, describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import './testSetup'
 import { clearStorage, readStorage, seedStorage } from './testSetup'
 import { initialView, useUiStore } from './uiStore'
 import { beginRender, failRender, finishRender, useRenderStore } from './renderStore'
 import { useLibraryStore } from './libraryStore'
 import { useProjectStore } from './projectStore'
-import { createProject } from '../project'
+import { createProject } from '../lib/project'
 
 const ui = () => useUiStore.getState()
 
@@ -232,5 +233,146 @@ describe('persistence', () => {
     expect(v.zoom).toBe(3)
     // an explicit false is honoured rather than defaulted
     expect(v.lockAspect).toBe(false)
+  })
+})
+
+/* ---- dialogs and per-dialog UI ------------------------------------------- */
+
+describe('uiStore dialogs', () => {
+  test('open and close', () => {
+    ui().openDialog('export')
+    expect(ui().dialog).toBe('export')
+    ui().closeDialog()
+    expect(ui().dialog).toBeNull()
+  })
+
+  test('only one dialog at a time', () => {
+    ui().openDialog('settings')
+    ui().openDialog('gallery')
+    expect(ui().dialog).toBe('gallery')
+  })
+})
+
+describe('uiStore export fields', () => {
+  test('patchExport writes only what it is given', () => {
+    const before = ui().exportQuality
+    ui().patchExport({ exportScale: 4 })
+    expect(ui().exportScale).toBe(4)
+    expect(ui().exportQuality).toBe(before)
+  })
+
+  test('resetExportTransient clears the result but keeps the settings', () => {
+    ui().patchExport({ exportStatus: { kind: 'ok', msg: 'done' }, exportProgress: 60 })
+    ui().patchExport({ exportScale: 3 })
+    ui().resetExportTransient('true:png')
+    expect(ui().exportStatus).toBeNull()
+    expect(ui().exportProgress).toBe(0)
+    expect(ui().exportScale).toBe(3)
+    expect(ui().exportEpoch).toBe('true:png')
+  })
+
+  test('the epoch guard only fires once per change', () => {
+    // the dialog's render-phase check compares against this, so it must not
+    // re-clear on every render
+    ui().patchExport({ exportProgress: 50 })
+    ui().resetExportTransient('true:png')
+    ui().patchExport({ exportProgress: 80 })
+    expect(ui().exportProgress).toBe(80)
+  })
+})
+
+describe('uiStore gallery', () => {
+  test('re-rolling replaces the items and bumps the round', () => {
+    const before = ui().galleryRound
+    ui().rerollGallery()
+    expect(ui().galleryRound).toBe(before + 1)
+    expect(ui().gallery).not.toBeNull()
+  })
+
+  test('per-card status is independent per card', () => {
+    ui().setGalleryCardStatus(0, 'done')
+    ui().setGalleryCardStatus(1, 'error')
+    expect(ui().galleryCardStatus[0]).toBe('done')
+    expect(ui().galleryCardStatus[1]).toBe('error')
+    // an unrendered card is still "loading" rather than inheriting a neighbour's
+    expect(ui().galleryCardStatus[2]).toBeUndefined()
+  })
+
+  test('re-rolling clears stale per-card status', () => {
+    ui().setGalleryCardStatus(0, 'done')
+    ui().rerollGallery()
+    expect(Object.keys(ui().galleryCardStatus)).toHaveLength(0)
+  })
+
+  test('the open edge fires once per transition', () => {
+    ui().syncGalleryOpen(true)
+    const round = ui().galleryRound
+    ui().syncGalleryOpen(true) // already open — must not re-roll
+    expect(ui().galleryRound).toBe(round)
+    ui().syncGalleryOpen(false)
+    expect(ui().galleryWasOpen).toBe(false)
+    expect(ui().gallery).toBeNull()
+  })
+})
+
+describe('uiStore param drafts', () => {
+  /**
+   * Params renders one NumInput per generator parameter, so a single shared
+   * draft string would make every field show and overwrite the same text.
+   */
+  test('drafts are keyed, not shared', () => {
+    ui().setParamDraft('L1:density', '12')
+    ui().setParamDraft('L1:radius', '44')
+    expect(ui().paramDrafts['L1:density']).toBe('12')
+    expect(ui().paramDrafts['L1:radius']).toBe('44')
+  })
+
+  test('clearing one draft leaves the others', () => {
+    ui().setParamDraft('a', '1')
+    ui().setParamDraft('b', '2')
+    ui().clearParamDraft('a')
+    expect(ui().paramDrafts['a']).toBeUndefined()
+    expect(ui().paramDrafts['b']).toBe('2')
+  })
+
+  test('an upstream change is remembered so the draft can be dropped', () => {
+    ui().markParamDrift('L1:density', 5)
+    expect(ui().paramDrifts['L1:density']).toBe(5)
+  })
+})
+
+describe('uiStore refs', () => {
+  /**
+   * DOM handles are held here so nothing needs a `useRef`, but the point is
+   * that *components* never select them — a ref write still notifies subscribers
+   * (Zustand has no field-level notifier), it just has no selected subscriber,
+   * so no component re-renders. This asserts the first half: the write happens
+   * and is readable, so the preview's `getState()` reads are correct.
+   */
+  test('a ref write is readable through getState', () => {
+    const el = {} as HTMLCanvasElement
+    useUiStore.getState().setRefs({ canvasRef: el })
+    expect(useUiStore.getState().canvasRef).toBe(el)
+    useUiStore.getState().setRasterMeta({ key: 'k', unit: 2, ir: null })
+    expect(useUiStore.getState().rasterMeta?.key).toBe('k')
+  })
+
+  /** The re-render guarantee comes from selectors, not from the store. */
+  test('no component selects a DOM handle', () => {
+    // Guards the invariant that keeps this cheap: if someone later writes
+    // useUiStore((s) => s.canvasRef), every cache write re-renders the stage.
+    const src = readFileSync(
+      new URL('../components/Preview.tsx', import.meta.url),
+      'utf8',
+    )
+    const selectors = src.match(/useUiStore\(\(s\) => ([^)]*)\)/g) ?? []
+    for (const sel of selectors) {
+      expect(sel).not.toContain('canvasRef')
+      expect(sel).not.toContain('stageRef')
+      expect(sel).not.toContain('rasterCanvas')
+      expect(sel).not.toContain('rasterMeta')
+      expect(sel).not.toContain('refineTimer')
+    }
+    expect(selectors.length).toBeGreaterThan(0)
   })
 })

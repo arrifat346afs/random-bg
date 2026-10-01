@@ -7,7 +7,7 @@
  */
 
 import { useEffect } from 'react'
-import { useUiStore } from '@/lib/state/uiStore'
+import { useUiStore } from '@/store/uiStore'
 
 export function useThemeEffect(): void {
   const theme = useUiStore((s) => s.view.theme)

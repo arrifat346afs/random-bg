@@ -7,8 +7,8 @@
  */
 
 import { create } from 'zustand'
-import { cloneProject } from '../project'
-import type { Project } from '../schema'
+import { cloneProject } from '../lib/project'
+import type { Project } from '../lib/schema'
 import { KEYS, loadJSON, saveJSON } from './persistence'
 import { useProjectStore } from './projectStore'
 import { useUiStore } from './uiStore'

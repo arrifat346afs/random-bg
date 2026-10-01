@@ -13,8 +13,8 @@
  * knows both the lock and the canvas it should apply to.
  */
 
-import { randomProject } from '../randomize'
-import { randomProjectChecked, type CheckedRandom, type RandomOpts } from '../quality'
+import { randomProject } from '../lib/randomize'
+import { randomProjectChecked, type CheckedRandom, type RandomOpts } from '../lib/quality'
 import { useProjectStore } from './projectStore'
 import { useRenderStore } from './renderStore'
 import { useUiStore } from './uiStore'

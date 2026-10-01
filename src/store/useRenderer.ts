@@ -9,7 +9,7 @@
  */
 
 import { useEffect } from 'react'
-import { requestRender } from '../render/service'
+import { requestRender } from '../lib/render/service'
 import { useProjectStore } from './projectStore'
 import { beginRender, failRender, finishRender, useRenderStore } from './renderStore'
 

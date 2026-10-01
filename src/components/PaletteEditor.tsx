@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useUiStore } from '@/store/uiStore'
 import {
   HARMONIES,
   PRESET_PALETTES,
@@ -47,8 +47,10 @@ interface Props {
  * edits propagate to every linked layer.
  */
 export function PaletteEditor({ palette, onChange }: Props) {
-  const [harmony, setHarmony] = useState<Harmony>('analogous')
-  const [copied, setCopied] = useState<number | null>(null)
+  const harmony = useUiStore((st) => st.paletteHarmony)
+  const copied = useUiStore((st) => st.paletteCopied)
+  const setHarmony = (v: Harmony) => useUiStore.getState().setPaletteHarmony(v)
+  const setCopied = (v: number | null) => useUiStore.getState().setPaletteCopied(v)
   const colors = palette.colors
 
   const setColors = (next: Color[]) =>

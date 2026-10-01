@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/accordion"
 import { Dices } from "lucide-react"
 import { SECTION_LABELS } from "./schema"
-import { useProjectStore } from '@/lib/state/projectStore'
+import { useProjectStore } from '@/store/projectStore'
 
 export function ParamsTab({ layer }: { layer: Layer }) {
   const gen = getGenerator(layer.gen)
@@ -100,6 +100,7 @@ export function ParamsTab({ layer }: { layer: Layer }) {
                   {shown.map((def) => (
                     <ParamField
                       key={def.key}
+                      layerId={layer.id}
                       def={def}
                       value={layer.params[def.key] ?? def.default}
                       locked={layer.locked || !!layer.locks[def.key]}

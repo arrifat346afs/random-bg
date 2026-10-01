@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { variations } from '@/lib/randomize'
+import { useEffect } from 'react'
+import { useUiStore } from '@/store/uiStore'
 import { generateProject } from '@/lib/pipeline'
 import { compositeLayers } from '@/lib/export'
 import { renderCanvas } from '@/lib/render/canvas'
@@ -14,7 +14,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Sparkles, RefreshCw, Check } from 'lucide-react'
-import { useProjectStore } from '@/lib/state/projectStore'
+import { useProjectStore } from '@/store/projectStore'
 
 interface Props {
   open: boolean
@@ -27,22 +27,17 @@ interface Props {
  */
 export function GalleryDialog({ open, onOpenChange }: Props) {
   const project = useProjectStore((s) => s.project)
-  const [items, setItems] = useState<Project[]>(() => variations(useProjectStore.getState().project, 9))
-  const [round, setRound] = useState(0)
+  const items = useUiStore((s) => s.gallery)
+  const round = useUiStore((s) => s.galleryRound)
+  const ui = () => useUiStore.getState()
 
-  // Re-roll whenever the dialog opens (adjusted while rendering).
-  const [prevOpen, setPrevOpen] = useState(open)
-  if (prevOpen !== open) {
-    setPrevOpen(open)
-    if (open) {
-      setItems(variations(useProjectStore.getState().project, 9))
-      setRound((r) => r + 1)
-    }
-  }
+  // Re-roll whenever the dialog opens. Adjusted while rendering (not in an
+  // effect) so the cards never paint a stale frame first; `galleryWasOpen` in
+  // the store is the memory for that edge.
+  ui().syncGalleryOpen(open)
 
   const regenerate = () => {
-    setItems(variations(useProjectStore.getState().project, 9))
-    setRound((r) => r + 1)
+    ui().rerollGallery()
   }
 
   return (
@@ -67,7 +62,7 @@ export function GalleryDialog({ open, onOpenChange }: Props) {
         </div>
 
         <div className="grid min-h-0 flex-1 grid-cols-2 gap-3 overflow-y-auto thin-scroll p-4 sm:grid-cols-3">
-          {items.map((p, i) => (
+          {(items ?? []).map((p, i) => (
             <GalleryCard
               key={`${round}-${i}`}
               project={p}
@@ -93,14 +88,24 @@ function GalleryCard({
   index: number
   onPick: () => void
 }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [status, setStatus] = useState<'loading' | 'done' | 'error'>('loading')
+  // Both are per-card, so both are keyed by index in the store — the canvas
+  // handle is read via getState() (nothing renders it) and the status is
+  // subscribed (it does drive a spinner).
+  const status = useUiStore((s) => s.galleryCardStatus[index] ?? 'loading')
+  const ui = () => useUiStore.getState()
+  // Callback ref rather than a ref object: the element handle lives in the
+  // store, and an inline `{current}` object would be a new ref every render, so
+  // React would detach and reattach it (and the effect below would see a
+  // different object each time).
+  const attach = (el: HTMLCanvasElement | null) => ui().setGalleryCardRef(index, el)
 
   // Flip back to "loading" while rendering whenever the card's project changes.
-  const [prevProject, setPrevProject] = useState(project)
-  if (prevProject !== project) {
-    setPrevProject(project)
-    setStatus('loading')
+  // The round counter identifies the project, so it doubles as the memory.
+  const round = useUiStore((s) => s.galleryRound)
+  const renderedFor = useUiStore((s) => s.galleryCardRound[index])
+  if (renderedFor !== round) {
+    ui().markGalleryCardRound(index, round)
+    ui().resetGalleryCardStatus(index)
   }
 
   useEffect(() => {
@@ -110,30 +115,30 @@ function GalleryCard({
         const results = await generateProject(project)
         if (cancelled) return
         const ir = compositeLayers(project, results)
-        const canvas = canvasRef.current
+        const canvas = ui().galleryCardRefs[index]
         if (!canvas) return
         // renderCanvas sizes the bitmap itself: target ~360px on the long edge
         const scale = 360 / Math.max(ir.w, ir.h)
         renderCanvas(ir, canvas, { scale, background: project.canvas.bg, clear: true })
-        setStatus('done')
+        ui().setGalleryCardStatus(index, 'done')
       } catch {
-        if (!cancelled) setStatus('error')
+        if (!cancelled) ui().setGalleryCardStatus(index, 'error')
       }
     }
     void run()
     return () => {
       cancelled = true
     }
-  }, [project])
+  }, [project, index])
 
   return (
     <button
       onClick={onPick}
       className="group relative flex flex-col overflow-hidden rounded-lg border bg-muted/30 text-left transition-all hover:-translate-y-0.5 hover:border-primary hover:shadow-lg"
     >
-      <span className="relative block aspect-[4/3] w-full overflow-hidden">
+      <span className="relative block aspect-4/3 w-full overflow-hidden">
         <canvas
-          ref={canvasRef}
+          ref={attach}
           className="h-full w-full object-cover"
           aria-label={`Variation ${index + 1}`}
         />

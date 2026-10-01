@@ -1,8 +1,8 @@
-import { useState } from 'react'
 import type { ParamDef, ParamValue } from '@/lib/schema'
 import { Slider } from '@/components/ui/slider'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { useUiStore } from '@/store/uiStore'
 import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Button } from '@/components/ui/button'
@@ -11,6 +11,8 @@ import { Dices, Lock, LockOpen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export interface ParamFieldProps {
+  /** owning layer, so each field's uncommitted draft is its own */
+  layerId: string
   def: ParamDef
   value: ParamValue
   locked: boolean
@@ -27,6 +29,7 @@ export function ParamField({
   onChange,
   onToggleLock,
   onRandomize,
+  layerId,
 }: ParamFieldProps) {
   const step = def.step ?? (def.type === 'int' ? 1 : 0.01)
 
@@ -153,6 +156,7 @@ export function ParamField({
             max={def.max}
             step={step}
             disabled={locked}
+            draftKey={`${layerId}:${def.key}-lo`}
             onChange={(v) => onChange([v, hi])}
           />
           <span className="text-[10px] text-muted-foreground">→</span>
@@ -162,6 +166,7 @@ export function ParamField({
             max={def.max}
             step={step}
             disabled={locked}
+            draftKey={`${layerId}:${def.key}-hi`}
             onChange={(v) => onChange([lo, v])}
           />
         </div>
@@ -192,7 +197,8 @@ export function ParamField({
             max={max}
             step={step}
             disabled={locked}
-            onChange={(v) => onChange(v)}
+            draftKey={`${layerId}:${def.key}`}
+            onChange={onChange}
           />
         </div>
       </div>
@@ -220,6 +226,7 @@ function NumInput({
   onChange,
   disabled,
   id,
+  draftKey,
 }: {
   value: number
   min?: number
@@ -228,14 +235,22 @@ function NumInput({
   onChange: (v: number) => void
   disabled?: boolean
   id?: string
+  /** layer + param identity, so each field's draft is its own */
+  draftKey: string
 }) {
-  const [draft, setDraft] = useState<string>(String(round(value, step)))
-  // Adjust the local draft while rendering when the value changes upstream
-  // (undo/redo, randomise) — cheaper and safer than syncing in an effect.
-  const [prev, setPrev] = useState({ value, step })
-  if (prev.value !== value || prev.step !== step) {
-    setPrev({ value, step })
-    setDraft(String(round(value, step)))
+  const ui = () => useUiStore.getState()
+  const stored = useUiStore((s) => s.paramDrafts[draftKey])
+  const draft = stored ?? String(round(value, step))
+  const setDraft = (t: string) => ui().setParamDraft(draftKey, t)
+
+  // Adopt the upstream value when it changes (undo/redo, randomise) — unless
+  // the user is mid-edit in this exact field. Adjusting while rendering is
+  // cheaper and safer than syncing in an effect, and `paramDriftsAt` is the
+  // store-side memory for "the value this draft was seeded from".
+  const driftKey = ui().paramDrifts[draftKey]
+  if (driftKey !== value) {
+    ui().markParamDrift(draftKey, value)
+    ui().clearParamDraft(draftKey)
   }
 
   const commit = (text: string) => {
