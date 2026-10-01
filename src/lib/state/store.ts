@@ -17,6 +17,12 @@ export interface ViewState {
   panY: number
   checker: boolean
   theme: 'system' | 'light' | 'dark'
+  /**
+   * Aspect lock: Randomise keeps the canvas at its current w×h instead of
+   * rolling a new size. On by default — `mutateProject`/`breed` already inherit
+   * the canvas, and rolling a fresh size on every press was the odd one out.
+   */
+  lockAspect: boolean
 }
 
 export interface Progress {
@@ -115,8 +121,11 @@ function initialView(): ViewState {
     panY: 0,
     checker: true,
     theme: initialTheme(),
+    lockAspect: true,
   }
   const saved = loadJSON<Partial<ViewState>>(KEYS.view)
+  // `saved` is Partial, so a view persisted before the lock existed simply has
+  // no `lockAspect` key and inherits the `true` default from `base`.
   if (saved) return { ...base, ...saved, theme: base.theme }
   return base
 }
@@ -323,7 +332,14 @@ export function saveView(immediate = false): void {
     panX: state.view.panX,
     panY: state.view.panY,
     checker: state.view.checker,
+    lockAspect: state.view.lockAspect,
   })
+}
+
+/** Toggle the Randomise aspect lock. Mirrors `saveTheme` — no undo entry. */
+export function setLockAspect(locked: boolean): void {
+  setState((s) => ({ view: { ...s.view, lockAspect: locked } }))
+  saveView(true)
 }
 
 /* ---- User presets --------------------------------------------------------- */

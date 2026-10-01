@@ -97,11 +97,45 @@ for (let i = 0; i < 8; i++) {
   )
 }
 
+console.log('— canvas aspect —')
+let aspectFailures = 0
+{
+  // The lock must pin the canvas exactly, including sizes that are not presets.
+  const LOCK = { w: 1234, h: 567 }
+  let drifted = 0
+  for (let i = 0; i < 200; i++) {
+    const p = randomProject(i * 7919 + 1, { canvas: LOCK })
+    if (p.canvas.w !== LOCK.w || p.canvas.h !== LOCK.h) drifted++
+  }
+  if (drifted) {
+    aspectFailures++
+    console.log(`  !! aspect lock: ${drifted}/200 locked rolls changed the canvas size`)
+  } else console.log(`  aspect lock holds 200/200 at ${LOCK.w}×${LOCK.h} ✓`)
+
+  // Unlocked rolls must stay inside the curated pool. Two independent w/h pools
+  // used to pair up arbitrarily and produced 1920×500 (3.84:1) and similar.
+  const pool = new Set(['1080x1080', '1920x1080', '1080x1350', '1080x1920', '1500x500', '1200x1200'])
+  const offPool = new Set<string>()
+  for (let i = 0; i < 200; i++) {
+    const p = randomProject(i * 104729 + 3)
+    const k = `${p.canvas.w}x${p.canvas.h}`
+    if (!pool.has(k)) offPool.add(k)
+  }
+  if (offPool.size) {
+    aspectFailures++
+    console.log(`  !! unlocked rolls produced off-pool sizes: ${[...offPool].join(', ')}`)
+  } else console.log('  unlocked rolls stay in the curated pool (200/200) ✓')
+}
+
 console.log('— svg portability —')
 if (portableFailures === 0) {
   console.log('  no renderer-hostile constructs ✓')
 } else {
   console.log(`  ${portableFailures} file(s) use constructs strict SVG renderers mishandle`)
+}
+
+if (portableFailures > 0 || aspectFailures > 0) {
+  console.log('FAILED')
   process.exitCode = 1
 }
 

@@ -55,6 +55,18 @@ Two rules the SVG backend follows because of this table:
 
 ## Randomiser and quality gate
 
+- **The randomiser never invents a canvas ratio.** Sizes come from one curated
+  list of coherent pairs (`RANDOM_CANVAS_SIZES`), not two independent pools —
+  independent pools pair up arbitrarily and used to produce 1920×500 (3.84:1)
+  and 1200×500 (2.40:1) on a few percent of rolls each. The pool is capped at
+  1920 on the long edge: the gate renders every attempt inside a 750 ms budget
+  and a 4K roll costs ~4× the pixels, which would blow the budget and silently
+  degrade randomise to a single ungated roll. Use a size preset for 4K.
+- **The aspect lock is on by default**, so Randomise keeps the current w×h
+  unless you unlock it (lock button beside Randomise). This matches
+  `mutateProject` and `breed`, which inherit the canvas via `structuredClone` —
+  Randomise was the only path that reshaped it. The lock applies to the ungated
+  fallback roll too, not just the gated one.
 - **White-out comes from inside the generators.** `emitters` and `streaks`
   composite their trails with node-level `screen` blending, so a dense roll
   saturates to white *within the layer*, regardless of the layer's own blend

@@ -407,7 +407,41 @@ export function fitDensity(
 
 /* ---- Project-level randomise --------------------------------------------- */
 
-export function randomProject(seed?: number, opts: { layers?: number; bg?: boolean } = {}): Project {
+/**
+ * Canvas sizes the randomiser may roll — a curated list of coherent (w, h)
+ * pairs, never two independent pools. Independent pools pair up arbitrarily and
+ * produced shapes nobody asked for: 1920x500 (3.84:1) and 1200x500 (2.40:1)
+ * each landed ~2% of rolls, while only 24% came out square.
+ *
+ * Weighted toward square because that is the common overlay case, and capped at
+ * 1920 on the long edge: the quality gate renders every attempt inside a 750 ms
+ * budget, and a 4K roll costs ~4x the pixels, which would blow the budget and
+ * silently degrade randomise to a single ungated roll.
+ */
+const RANDOM_CANVAS_SIZES: ReadonlyArray<readonly [number, number]> = [
+  [1080, 1080],
+  [1080, 1080],
+  [1080, 1080],
+  [1920, 1080],
+  [1080, 1350],
+  [1080, 1920],
+  [1500, 500],
+  [1200, 1200],
+]
+
+export interface RandomProjectOpts {
+  layers?: number
+  bg?: boolean
+  /**
+   * Pins the canvas to an exact size. The aspect lock in the UI passes the
+   * current canvas through so Randomise keeps the shape the user chose — the
+   * same treatment `mutateProject` and `breed` already get for free via
+   * `structuredClone`.
+   */
+  canvas?: { w: number; h: number }
+}
+
+export function randomProject(seed?: number, opts: RandomProjectOpts = {}): Project {
   const s = seed ?? Math.floor(Math.random() * 0xffffffff)
   const rng = createRng(s)
   const harmony = rng.pick(['analogous', 'complementary', 'triad', 'split', 'warm', 'cool', 'gold', 'neon', 'autumn', 'ice', 'pastel', 'ember', 'jewel', 'monochrome'] as Harmony[])
@@ -448,12 +482,17 @@ export function randomProject(seed?: number, opts: { layers?: number; bg?: boole
     opts.bg === false ? { kind: 'transparent' } : rng.pick(BACKGROUND_POOL())
   const bg = opts.bg === false ? wanted : pairBackground(wanted, palette, built, rng)
 
+  // locked → the caller's exact size; otherwise one curated coherent pair.
+  // Ternary rather than `?? rng.pick(...)` so a locked roll draws nothing
+  // extra from the RNG.
+  const [pw, ph] = opts.canvas ? [opts.canvas.w, opts.canvas.h] : rng.pick(RANDOM_CANVAS_SIZES)
+
   return {
     v: 1,
     name: randomProjectName(rng),
     canvas: {
-      w: rng.pick([1080, 1080, 1080, 1920, 1200, 1080, 1500]),
-      h: rng.pick([1080, 1080, 1350, 1080, 1200, 1920, 500]),
+      w: pw,
+      h: ph,
       bg,
     },
     seed: s,

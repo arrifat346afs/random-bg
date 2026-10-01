@@ -8,6 +8,7 @@ import {
   patchProject,
   redo,
   saveTheme,
+  setLockAspect,
   setState,
   undo,
 } from '@/lib/state/store'
@@ -44,6 +45,8 @@ import {
   ChevronDown,
   Bug,
   Copy,
+  Lock,
+  LockOpen,
 } from 'lucide-react'
 
 interface Props {
@@ -57,6 +60,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
   const project = useStore((s) => s.project)
   const generating = useStore((s) => s.generating)
   const theme = useStore((s) => s.view.theme)
+  const lockAspect = useStore((s) => s.view.lockAspect)
   const canUndoNow = useStore((s) => s.past.length > 0)
   const canRedoNow = useStore((s) => s.future.length > 0)
   const storageOk = useStore((s) => s.storageAvailable)
@@ -192,6 +196,24 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
 
       {/* headline actions */}
       <div className="flex items-center gap-1">
+        <Tip
+          label={
+            lockAspect
+              ? `Aspect locked — Randomise keeps ${project.canvas.w}×${project.canvas.h}`
+              : 'Aspect unlocked — Randomise rolls a new canvas size each press'
+          }
+        >
+          <Button
+            size="sm"
+            variant={lockAspect ? 'secondary' : 'ghost'}
+            onClick={() => setLockAspect(!lockAspect)}
+            aria-pressed={lockAspect}
+            aria-label={lockAspect ? 'Unlock canvas aspect ratio' : 'Lock canvas aspect ratio'}
+            className="px-1.5"
+          >
+            {lockAspect ? <Lock /> : <LockOpen />}
+          </Button>
+        </Tip>
         <Button
           size="sm"
           variant="outline"

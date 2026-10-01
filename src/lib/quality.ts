@@ -218,6 +218,11 @@ export interface RandomOpts {
   attempts?: number
   /** Wall-clock budget in ms (default 750) — the gate never blocks the UI. */
   budgetMs?: number
+  /**
+   * Pin the canvas to an exact size for every attempt (the aspect lock).
+   * Omitted → each attempt rolls its own size from the curated pool.
+   */
+  canvas?: { w: number; h: number }
 }
 
 export interface CheckedRandom {
@@ -256,7 +261,11 @@ export async function randomProjectChecked(
   for (let i = 0; i < maxTries; i++) {
     // attempt 0 uses the seed verbatim, so an already-good seed stays put
     const sub = i === 0 ? seed : hash32(seed, i)
-    const project = randomProject(sub, { layers: opts.layers, bg: opts.bg })
+    const project = randomProject(sub, {
+      layers: opts.layers,
+      bg: opts.bg,
+      canvas: opts.canvas,
+    })
     onProgress?.(i + 1, maxTries)
 
     const out = await requestRender(project, () => {})

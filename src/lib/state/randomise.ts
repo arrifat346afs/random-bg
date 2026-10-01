@@ -12,7 +12,7 @@
 
 import { randomProject } from '../randomize'
 import { randomProjectChecked, type CheckedRandom, type RandomOpts } from '../quality'
-import { applyProject, setState } from './store'
+import { applyProject, getState, setState } from './store'
 
 /** True while a gated randomise is in flight — used to disable the button. */
 let busy = false
@@ -28,20 +28,31 @@ export const isRandomising = (): boolean => busy
 export async function randomise(opts: RandomOpts = {}): Promise<CheckedRandom | null> {
   if (busy) return null
   busy = true
-  const max = opts.attempts ?? 8
+  // Snapshot the canvas *before* the first await: `applyProject` replaces it
+  // below, and the aspect lock has to describe the project the user is looking
+  // at, not the one this roll produced.
+  const { project: current, view } = getState()
+  const roll: RandomOpts = {
+    ...opts,
+    canvas: view.lockAspect ? { w: current.canvas.w, h: current.canvas.h } : undefined,
+  }
+  const max = roll.attempts ?? 8
   setState({ generating: true, error: null, progress: { done: 0, total: max, label: 'randomising' } })
   try {
     let checked: CheckedRandom | null = null
     try {
-      checked = await randomProjectChecked(undefined, opts, (done, total) =>
+      checked = await randomProjectChecked(undefined, roll, (done, total) =>
         setState({ progress: { done, total, label: 'randomising' } }),
       )
     } catch {
       checked = null // fall through to the ungated roll below
     }
 
-    const project = checked ? checked.project : randomProject()
-    applyProject(project)
+    // The ungated fallback has to honour the lock as well — it is the path
+    // taken exactly when the gate fails, so ignoring it would reshape the
+    // canvas on the rolls the user is most likely to notice.
+    const next = checked ? checked.project : randomProject(undefined, roll)
+    applyProject(next)
     return checked
   } finally {
     busy = false
