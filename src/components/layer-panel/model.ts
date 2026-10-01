@@ -37,8 +37,54 @@ export interface LayerSummary {
   offset: { x: number; y: number } | null
 }
 
+/**
+ * Last summary per layer id.
+ *
+ * Deliberately module-level: it is a pure memoisation over immutable input, and
+ * it has to outlive a single call. Layers are never mutated in place, so an id
+ * whose displayed fields have not moved can hand back the previous object.
+ *
+ * That sharing is load-bearing, not an optimisation. Zustand's `shallow` compares
+ * array elements with `Object.is`, so a projection that built a fresh object per
+ * layer would make `useShallow` return a brand-new array on *every* call. React's
+ * `useSyncExternalStore` then sees an unstable `getSnapshot` and re-renders
+ * forever — "The result of getSnapshot should be cached to avoid an infinite
+ * loop", followed by "Maximum update depth exceeded".
+ */
+const cache = new Map<string, LayerSummary>()
+
+/** Layer ids churn as layers are added and removed, so keep the map bounded. */
+const CACHE_LIMIT = 512
+
+function sameFields(a: LayerSummary, b: LayerSummary): boolean {
+  if (
+    a.id !== b.id ||
+    a.name !== b.name ||
+    a.gen !== b.gen ||
+    a.visible !== b.visible ||
+    a.solo !== b.solo ||
+    a.locked !== b.locked ||
+    a.blend !== b.blend ||
+    a.opacity !== b.opacity ||
+    a.groupId !== b.groupId ||
+    a.offset?.x !== b.offset?.x ||
+    a.offset?.y !== b.offset?.y ||
+    a.swatches.length !== b.swatches.length
+  ) {
+    return false
+  }
+  // swatches is compared by value: the palette array is replaced on edit, so
+  // reference equality would report every palette change as a row change even
+  // when the colours are identical
+  for (let i = 0; i < a.swatches.length; i++) {
+    if (a.swatches[i] !== b.swatches[i]) return false
+  }
+  return true
+}
+
+/** Project a layer, reusing the previous object when nothing displayed moved. */
 export function summarise(layer: Layer): LayerSummary {
-  return {
+  const next: LayerSummary = {
     id: layer.id,
     name: layer.name,
     gen: layer.gen,
@@ -51,6 +97,11 @@ export function summarise(layer: Layer): LayerSummary {
     swatches: layer.color.palette.colors,
     offset: layer.offset ?? null,
   }
+  const prev = cache.get(next.id)
+  if (prev && sameFields(prev, next)) return prev
+  if (cache.size > CACHE_LIMIT) cache.clear()
+  cache.set(next.id, next)
+  return next
 }
 
 /** Project a layer list to summaries, preserving order. */

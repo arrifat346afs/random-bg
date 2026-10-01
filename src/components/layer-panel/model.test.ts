@@ -96,3 +96,67 @@ describe('toBlocks', () => {
     expect(toBlocks(ls, [])).toHaveLength(2)
   })
 })
+
+/* ---- structural sharing --------------------------------------------------- */
+
+/**
+ * These tests cover the "Maximum update depth exceeded" bug.
+ *
+ * `useShallow` compares array elements with `Object.is`, so a projection that
+ * allocated a fresh object per layer produced a new array on every call. React's
+ * `useSyncExternalStore` saw an unstable `getSnapshot` and re-rendered forever.
+ * The fix is that `summarise` hands back the *previous* object whenever nothing
+ * it displays has moved.
+ */
+describe('summarise identity', () => {
+  test('the same layer yields the same object', () => {
+    const l = createProject({ seed: 7, layers: ['smoke'] }).layers[0]
+    expect(summarise(l)).toBe(summarise(l))
+  })
+
+  test('a param edit yields the same object', () => {
+    const l = createProject({ seed: 8, layers: ['smoke'] }).layers[0]
+    const before = summarise(l)
+    // params are not displayed, so the row must not be handed a new object
+    expect(summarise({ ...l, params: { ...l.params, sizeMin: 0.42 } })).toBe(before)
+  })
+
+  test('an unrendered edit (dist/mods) also yields the same object', () => {
+    const l = createProject({ seed: 9, layers: ['smoke'] }).layers[0]
+    const before = summarise(l)
+    expect(summarise({ ...l, dist: { ...l.dist, type: 'clustered' } as never })).toBe(before)
+  })
+
+  test('a displayed change yields a new object', () => {
+    const l = createProject({ seed: 10, layers: ['smoke'] }).layers[0]
+    const before = summarise(l)
+    expect(summarise({ ...l, name: 'renamed' })).not.toBe(before)
+    expect(summarise({ ...l, visible: !l.visible })).not.toBe(before)
+    expect(summarise({ ...l, locked: !l.locked })).not.toBe(before)
+    expect(summarise({ ...l, opacity: 0.25 })).not.toBe(before)
+    expect(summarise({ ...l, offset: { x: 5, y: 5 } })).not.toBe(before)
+  })
+
+  test('a palette change to different colours yields a new object', () => {
+    const l = createProject({ seed: 11, layers: ['smoke'] }).layers[0]
+    const before = summarise(l)
+    const next = summarise({
+      ...l,
+      color: { ...l.color, palette: { ...l.color.palette, colors: ['#123456', '#abcdef'] } },
+    })
+    expect(next).not.toBe(before)
+    expect(next.swatches).toEqual(['#123456', '#abcdef'])
+  })
+
+  test('a re-created but identical palette keeps the object', () => {
+    // the palette array is replaced on every palette edit, so reference
+    // equality would report a change even when the colours are identical
+    const l = createProject({ seed: 12, layers: ['smoke'] }).layers[0]
+    const before = summarise(l)
+    const next = summarise({
+      ...l,
+      color: { ...l.color, palette: { ...l.color.palette, colors: [...l.color.palette.colors] } },
+    })
+    expect(next).toBe(before)
+  })
+})
