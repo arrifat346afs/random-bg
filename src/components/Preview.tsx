@@ -4,14 +4,15 @@ import { drawBackground, drawIR } from '@/lib/render/canvas'
 import { composeIR } from '@/lib/pipeline'
 import { hitTestLayers, layerBoundsFor } from '@/lib/select'
 import { layerOffset } from '@/lib/schema'
-import { commit, getState, patchProject, saveView, selectLayer, setState } from '@/lib/state/store'
 import { isTyping, isSpaceHeld, setSpaceHeld } from '@/lib/keyboard'
-import { useStore } from '@/lib/state/useStore'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Maximize2, Minus, Plus, Layers } from 'lucide-react'
+import { useProjectStore } from '@/lib/state/projectStore'
+import { useRenderStore } from '@/lib/state/renderStore'
+import { useUiStore } from '@/lib/state/uiStore'
 
 const MIN_ZOOM = 0.05
 const MAX_ZOOM = 8
@@ -34,22 +35,22 @@ export function Preview() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [size, setSize] = useState({ w: 0, h: 0 })
 
-  const zoom = useStore((s) => s.view.zoom)
-  const panX = useStore((s) => s.view.panX)
-  const panY = useStore((s) => s.view.panY)
-  const checker = useStore((s) => s.view.checker)
-  const resultsVersion = useStore((s) => s.resultsVersion)
-  const results = useStore((s) => s.results)
-  const generating = useStore((s) => s.generating)
-  const progress = useStore((s) => s.progress)
-  const primitiveCount = useStore((s) => s.primitiveCount)
-  const truncated = useStore((s) => s.truncated)
-  const renderMs = useStore((s) => s.renderMs)
-  const error = useStore((s) => s.error)
-  const canvas = useStore((s) => s.project.canvas)
-  const project = useStore((s) => s.project)
-  const layerCount = useStore((s) => s.project.layers.length)
-  const selectedLayerId = useStore((s) => s.selectedLayerId)
+  const zoom = useUiStore((s) => s.view.zoom)
+  const panX = useUiStore((s) => s.view.panX)
+  const panY = useUiStore((s) => s.view.panY)
+  const checker = useUiStore((s) => s.view.checker)
+  const resultsVersion = useRenderStore((s) => s.resultsVersion)
+  const results = useRenderStore((s) => s.results)
+  const generating = useRenderStore((s) => s.generating)
+  const progress = useRenderStore((s) => s.progress)
+  const primitiveCount = useRenderStore((s) => s.primitiveCount)
+  const truncated = useRenderStore((s) => s.truncated)
+  const renderMs = useRenderStore((s) => s.renderMs)
+  const error = useRenderStore((s) => s.error)
+  const canvas = useProjectStore((s) => s.project.canvas)
+  const project = useProjectStore((s) => s.project)
+  const layerCount = useProjectStore((s) => s.project.layers.length)
+  const selectedLayerId = useProjectStore((s) => s.selectedLayerId)
 
   const ir: IR | null = useMemo(() => {
     if (!results) return null
@@ -184,27 +185,26 @@ export function Preview() {
   /* ---- interaction ------------------------------------------------------ */
 
   const applyView = useCallback((patch: Partial<{ zoom: number; panX: number; panY: number }>) => {
-    const s = getState()
-    const zoom2 = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, patch.zoom ?? s.view.zoom))
-    setState({ view: { ...s.view, ...patch, zoom: zoom2 } })
-    saveView()
+    const current = useUiStore.getState().view.zoom
+    const zoom2 = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, patch.zoom ?? current))
+    useUiStore.getState().patchView({ ...patch, zoom: zoom2 })
   }, [])
 
   const onWheel = useCallback(
     (e: React.WheelEvent) => {
       e.preventDefault()
-      const s = getState()
+      const s = useUiStore.getState().view
       const rect = containerRef.current?.getBoundingClientRect()
       if (!rect) return
       const mx = e.clientX - rect.left - rect.width / 2
       const my = e.clientY - rect.top - rect.height / 2
       const factor = Math.exp(-e.deltaY * 0.0016)
-      const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, s.view.zoom * factor))
-      const k = nextZoom / s.view.zoom
+      const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, s.zoom * factor))
+      const k = nextZoom / s.zoom
       applyView({
         zoom: nextZoom,
-        panX: mx - (mx - s.view.panX) * k,
-        panY: my - (my - s.view.panY) * k,
+        panX: mx - (mx - s.panX) * k,
+        panY: my - (my - s.panY) * k,
       })
     },
     [applyView],
@@ -241,14 +241,16 @@ export function Preview() {
     (e: React.PointerEvent) => {
       const space = isSpaceHeld()
       const middle = e.button === 1
-      const s = getState()
+      const s = useProjectStore.getState()
+      const v = useUiStore.getState().view
       if (!space && !middle) {
         // Plain left-press on the artwork selects the topmost layer under the
         // cursor and starts a move; empty stage still deselects.
         if (e.target !== canvasRef.current) return
         const p = toIR(e.clientX, e.clientY)
-        const hit = p && s.results ? hitTestLayers(s.results, s.project, p.x, p.y) : null
-        selectLayer(hit)
+        const rs = useRenderStore.getState().results
+        const hit = p && rs ? hitTestLayers(rs, s.project, p.x, p.y) : null
+        useProjectStore.getState().selectLayer(hit)
         const layer = hit ? s.project.layers.find((l) => l.id === hit) : undefined
         if (!hit || !layer || layer.locked || !p || !view) return
         const { x, y } = layerOffset(layer)
@@ -257,8 +259,8 @@ export function Preview() {
           mode: 'move',
           x: e.clientX,
           y: e.clientY,
-          px: s.view.panX,
-          py: s.view.panY,
+          px: v.panX,
+          py: v.panY,
           ox: x,
           oy: y,
           moved: false,
@@ -276,8 +278,8 @@ export function Preview() {
         mode: 'pan',
         x: e.clientX,
         y: e.clientY,
-        px: s.view.panX,
-        py: s.view.panY,
+        px: v.panX,
+        py: v.panY,
         ox: 0,
         oy: 0,
         moved: false,
@@ -312,7 +314,7 @@ export function Preview() {
       const id = selectedLayerId
       if (!id) return
       // transient during the gesture; one coalesced commit lands on release
-      patchProject((p) => ({
+      useProjectStore.getState().patchProject((p) => ({
         ...p,
         layers: p.layers.map((l) =>
           l.id === id ? { ...l, offset: { x: d.ox + dx, y: d.oy + dy } } : l,
@@ -329,19 +331,18 @@ export function Preview() {
       dragRef.current = null
       // Collapse the whole gesture into a single undo entry
       if (d.mode === 'move' && d.moved && selectedLayerId) {
-        commit(getState().project, { coalesce: `move:${selectedLayerId}` })
+        useProjectStore.getState().commit(useProjectStore.getState().project, { coalesce: `move:${selectedLayerId}` })
       }
     },
     [selectedLayerId],
   )
 
   const fit = useCallback(() => {
-    setState({ view: { ...getState().view, zoom: 1, panX: 0, panY: 0 } })
-    saveView()
+    useUiStore.getState().patchView({ zoom: 1, panX: 0, panY: 0 })
   }, [])
 
   const zoomBy = useCallback(
-    (k: number) => applyView({ zoom: getState().view.zoom * k }),
+    (k: number) => applyView({ zoom: useUiStore.getState().view.zoom * k }),
     [applyView],
   )
 
@@ -443,7 +444,7 @@ export function Preview() {
                 randomise a whole project.
               </p>
               <div className="pointer-events-auto flex justify-center gap-2">
-                <Button size="sm" onClick={() => setState({ leftSheet: true })}>
+                <Button size="sm" onClick={() => useUiStore.getState().setSheet('left', true)}>
                   Add layer
                 </Button>
                 <Button

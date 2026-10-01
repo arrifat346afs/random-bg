@@ -7,10 +7,10 @@
  */
 
 import { useEffect } from 'react'
-import { useStore } from '@/lib/state/useStore'
+import { useUiStore } from '@/lib/state/uiStore'
 
 export function useThemeEffect(): void {
-  const theme = useStore((s) => s.view.theme)
+  const theme = useUiStore((s) => s.view.theme)
 
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)')

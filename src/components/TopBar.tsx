@@ -2,17 +2,6 @@ import { useState } from 'react'
 import { formatSeed, parseSeed, randomSeedString } from '@/lib/rng'
 import { mutateProject, variations, breed } from '@/lib/randomize'
 import { randomise } from '@/lib/state/randomise'
-import {
-  applyProject,
-  getState,
-  patchProject,
-  redo,
-  saveTheme,
-  setLockAspect,
-  setState,
-  undo,
-} from '@/lib/state/store'
-import { useStore } from '@/lib/state/useStore'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
@@ -50,6 +39,9 @@ import {
   Copy,
   Ratio,
 } from 'lucide-react'
+import { useProjectStore } from '@/lib/state/projectStore'
+import { useRenderStore } from '@/lib/state/renderStore'
+import { useUiStore } from '@/lib/state/uiStore'
 
 interface Props {
   onOpenPresets: () => void
@@ -59,13 +51,13 @@ interface Props {
 }
 
 export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
-  const project = useStore((s) => s.project)
-  const generating = useStore((s) => s.generating)
-  const theme = useStore((s) => s.view.theme)
-  const lockAspect = useStore((s) => s.view.lockAspect)
-  const canUndoNow = useStore((s) => s.past.length > 0)
-  const canRedoNow = useStore((s) => s.future.length > 0)
-  const storageOk = useStore((s) => s.storageAvailable)
+  const project = useProjectStore((s) => s.project)
+  const generating = useRenderStore((s) => s.generating)
+  const theme = useUiStore((s) => s.view.theme)
+  const lockAspect = useUiStore((s) => s.view.lockAspect)
+  const canUndoNow = useProjectStore((s) => s.past.length > 0)
+  const canRedoNow = useProjectStore((s) => s.future.length > 0)
+  const storageOk = useUiStore((s) => s.storageAvailable)
   const [seedDraft, setSeedDraft] = useState(() => formatSeed(project.seed))
   const [showSeed, setShowSeed] = useState(false)
 
@@ -82,7 +74,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
 
   const applySeed = (raw: string) => {
     const s = parseSeed(raw)
-    patchProject((p) => ({ ...p, seed: s }))
+    useProjectStore.getState().patchProject((p) => ({ ...p, seed: s }))
   }
 
   const stepSeed = (delta: number) => applySeed(String(((project.seed + delta) >>> 0) || 1))
@@ -95,7 +87,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
       setRolling(false)
     }
   }
-  const doMutate = () => applyProject(mutateProject(getState().project, 0.18))
+  const doMutate = () => useProjectStore.getState().applyProject(mutateProject(useProjectStore.getState().project, 0.18))
 
   return (
     <header className="relative z-30 flex h-12 shrink-0 items-center gap-1.5 border-b bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:bg-background/80 sm:px-3">
@@ -121,7 +113,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
             size="icon-sm"
             variant="ghost"
             disabled={!canUndoNow}
-            onClick={undo}
+            onClick={() => useProjectStore.getState().undo()}
             aria-label="Undo"
           >
             <Undo2 />
@@ -132,7 +124,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
             size="icon-sm"
             variant="ghost"
             disabled={!canRedoNow}
-            onClick={redo}
+            onClick={() => useProjectStore.getState().redo()}
             aria-label="Redo"
           >
             <Redo2 />
@@ -233,7 +225,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
               <Switch
                 id="randomise-aspect"
                 checked={!lockAspect}
-                onCheckedChange={(v) => setLockAspect(!v)}
+                onCheckedChange={(v) => useUiStore.getState().setLockAspect(!v)}
               />
             </div>
 
@@ -245,7 +237,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
                 <DropdownMenuItem
                   key={s.label}
                   onSelect={() =>
-                    patchProject((p) => ({ ...p, canvas: { ...p.canvas, w: s.w, h: s.h } }))
+                    useProjectStore.getState().patchProject((p) => ({ ...p, canvas: { ...p.canvas, w: s.w, h: s.h } }))
                   }
                   className="flex items-center justify-between gap-2"
                 >
@@ -287,13 +279,13 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
               Explore
             </DropdownMenuLabel>
             <MenuItem onClick={onOpenGallery}>Evolve gallery (8 variations)</MenuItem>
-            <MenuItem onClick={() => applyProject(breed(getState().project, getState().project))}>
+            <MenuItem onClick={() => useProjectStore.getState().applyProject(breed(useProjectStore.getState().project, useProjectStore.getState().project))}>
               Breed with itself
             </MenuItem>
             <MenuItem
               onClick={() => {
-                const vs = variations(getState().project, 6)
-                if (vs[0]) applyProject(vs[0])
+                const vs = variations(useProjectStore.getState().project, 6)
+                if (vs[0]) useProjectStore.getState().applyProject(vs[0])
               }}
             >
               One-step variation
@@ -302,7 +294,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
             <MenuItem onClick={onOpenPresets}>Browse preset library…</MenuItem>
             <MenuItem
               onClick={() =>
-                setState({ gallery: variations(getState().project, 9) })
+                useUiStore.getState().setGallery(variations(useProjectStore.getState().project, 9))
               }
             >
               Re-roll the gallery
@@ -347,8 +339,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
             onClick={() => {
               const next =
                 theme === 'light' ? 'dark' : theme === 'dark' ? 'system' : 'light'
-              setState({ view: { ...getState().view, theme: next } })
-              saveTheme()
+              useUiStore.getState().setTheme(next)
             }}
           >
             {theme === 'light' ? (

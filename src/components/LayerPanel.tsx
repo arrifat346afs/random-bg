@@ -18,8 +18,6 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import { getGenerator, generatorsByFamily } from '@/lib/generators'
 import type { Layer, LayerGroup } from '@/lib/schema'
-import { commit, getState, patchProject, selectLayer, updateLayer } from '@/lib/state/store'
-import { useStore } from '@/lib/state/useStore'
 import { createLayer, createGroup, duplicateLayer, moveLayer } from '@/lib/project'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -49,6 +47,7 @@ import {
   Ungroup,
   Group as GroupIcon,
 } from 'lucide-react'
+import { useProjectStore } from '@/lib/state/projectStore'
 
 /* ---- block model ----------------------------------------------------------
  * A "block" is either a single ungrouped layer or a contiguous run of layers
@@ -82,9 +81,9 @@ function toBlocks(layers: Layer[], groups: LayerGroup[]): Block[] {
 }
 
 export function LayerPanel() {
-  const layers = useStore((s) => s.project.layers)
-  const groups = useStore((s) => s.project.groups)
-  const selectedId = useStore((s) => s.selectedLayerId)
+  const layers = useProjectStore((s) => s.project.layers)
+  const groups = useProjectStore((s) => s.project.groups)
+  const selectedId = useProjectStore((s) => s.selectedLayerId)
   /** shift/cmd-clicked layers awaiting a group action */
   const [multi, setMulti] = useState<string[]>([])
 
@@ -102,13 +101,13 @@ export function LayerPanel() {
     if (from < 0 || to < 0) return
     const nextBlocks = arrayMove(blocks, from, to)
     const flat = nextBlocks.flatMap((b) => b.layers)
-    commit({ ...getState().project, layers: flat })
+    useProjectStore.getState().commit({ ...useProjectStore.getState().project, layers: flat })
   }
 
   /* ---- layer actions ---------------------------------------------------- */
 
   const addLayer = (genId: string) => {
-    const { project } = getState()
+    const { project } = useProjectStore.getState()
     const layer = createLayer(genId, project.seed + project.layers.length * 977)
     // New layers join the unified palette so future edits stay in sync.
     layer.color = {
@@ -117,35 +116,35 @@ export function LayerPanel() {
       palette: { ...project.palette, colors: project.palette.colors.slice() },
     }
     // Layers stack bottom→top: a new layer is appended (drawn last).
-    commit({ ...project, layers: [...project.layers, layer] }, { select: layer.id })
+    useProjectStore.getState().commit({ ...project, layers: [...project.layers, layer] }, { select: layer.id })
   }
 
   const removeLayer = (id: string) => {
-    const { project, selectedLayerId } = getState()
+    const { project, selectedLayerId } = useProjectStore.getState()
     const idx = project.layers.findIndex((l) => l.id === id)
     const layersNext = project.layers.filter((l) => l.id !== id)
     const nextSel =
       selectedLayerId === id
         ? (layersNext[Math.min(idx, layersNext.length - 1)]?.id ?? null)
         : selectedLayerId
-    commit({ ...project, layers: layersNext }, { select: nextSel })
+    useProjectStore.getState().commit({ ...project, layers: layersNext }, { select: nextSel })
   }
 
   const duplicate = (id: string) => {
-    const { project } = getState()
+    const { project } = useProjectStore.getState()
     const idx = project.layers.findIndex((l) => l.id === id)
     if (idx < 0) return
     const copy = duplicateLayer(project.layers[idx])
     const next = project.layers.slice()
     next.splice(idx + 1, 0, copy)
-    commit({ ...project, layers: next }, { select: copy.id })
+    useProjectStore.getState().commit({ ...project, layers: next }, { select: copy.id })
   }
 
   const toggle = (id: string, key: 'visible' | 'solo' | 'locked') =>
-    updateLayer(id, (l) => ({ ...l, [key]: !l[key] }))
+    useProjectStore.getState().updateLayer(id, (l) => ({ ...l, [key]: !l[key] }))
 
   const move = (id: string, dir: -1 | 1) => {
-    const { project } = getState()
+    const { project } = useProjectStore.getState()
     const layer = project.layers.find((l) => l.id === id)
     if (!layer) return
     const idx = project.layers.findIndex((l) => l.id === id)
@@ -161,7 +160,7 @@ export function LayerPanel() {
         target += dir
       }
       if (target < 0 || target >= project.layers.length) return
-      commit({ ...project, layers: moveLayer(project.layers, idx, target) })
+      useProjectStore.getState().commit({ ...project, layers: moveLayer(project.layers, idx, target) })
       return
     }
 
@@ -171,11 +170,11 @@ export function LayerPanel() {
       target += dir
     }
     if (target < 0 || target >= project.layers.length) return
-    commit({ ...project, layers: moveLayer(project.layers, idx, target) })
+    useProjectStore.getState().commit({ ...project, layers: moveLayer(project.layers, idx, target) })
   }
 
   const groupSelection = () => {
-    const { project } = getState()
+    const { project } = useProjectStore.getState()
     const ids = multi.length ? multi : selectedId ? [selectedId] : []
     if (ids.length < 2) return
     const set = new Set(ids)
@@ -189,12 +188,12 @@ export function LayerPanel() {
     const insertAt = Math.min(firstIdx, rest.length)
     const tagged = picked.map((l) => ({ ...l, groupId: group.id }))
     const next = [...rest.slice(0, insertAt), ...tagged, ...rest.slice(insertAt)]
-    commit({ ...project, layers: next, groups: [...project.groups, group] })
+    useProjectStore.getState().commit({ ...project, layers: next, groups: [...project.groups, group] })
     setMulti([])
   }
 
   const ungroupSelection = () => {
-    const { project } = getState()
+    const { project } = useProjectStore.getState()
     const ids = new Set(multi.length ? multi : selectedId ? [selectedId] : [])
     const touched = new Set<string>()
     const next = project.layers.map((l) => {
@@ -204,7 +203,7 @@ export function LayerPanel() {
       }
       return l
     })
-    commit({
+    useProjectStore.getState().commit({
       ...project,
       layers: next,
       groups: project.groups.filter((g) => !touched.has(g.id)),
@@ -217,7 +216,7 @@ export function LayerPanel() {
       setMulti((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
     } else {
       setMulti([])
-      selectLayer(id)
+      useProjectStore.getState().selectLayer(id)
     }
   }
 
@@ -416,7 +415,7 @@ function BlockView({
             aria-label={collapsed ? 'Expand group' : 'Collapse group'}
             onClick={() =>
               block.group &&
-              patchProject((p) => ({
+              useProjectStore.getState().patchProject((p) => ({
                 ...p,
                 groups: p.groups.map((g) =>
                   g.id === block.group!.id ? { ...g, collapsed: !g.collapsed } : g,

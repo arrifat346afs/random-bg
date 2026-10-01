@@ -19,8 +19,7 @@ import { TopBar } from '@/components/TopBar'
 import { useGlobalShortcuts, type DialogId } from '@/hooks/useGlobalShortcuts'
 import { useThemeEffect } from '@/hooks/useThemeEffect'
 import { useRenderer } from '@/lib/state/useRenderer'
-import { useStore } from '@/lib/state/useStore'
-import { setState } from '@/lib/state/store'
+import { useUiStore } from '@/lib/state/uiStore'
 
 // Dialogs are heavy and rarely opened, so they stay out of the initial bundle.
 const PresetBrowser = lazy(() =>
@@ -40,13 +39,17 @@ export default function App() {
   useRenderer()
   useThemeEffect()
 
-  const leftSheet = useStore((s) => s.leftSheet)
-  const rightSheet = useStore((s) => s.rightSheet)
+  const leftSheet = useUiStore((s) => s.leftSheet)
+  const rightSheet = useUiStore((s) => s.rightSheet)
   const [dialog, setDialog] = useState<DialogId>(null)
 
   // stable identity: useGlobalShortcuts re-subscribes on this
   const openDialog = useCallback((id: DialogId) => setDialog(id), [])
   const closeDialog = useCallback(() => setDialog(null), [])
+
+  // Actions are stable across renders in Zustand, so reaching for them through
+  // getState() here avoids subscribing the whole shell to the ui store.
+  const ui = () => useUiStore.getState()
 
   useGlobalShortcuts(openDialog)
 
@@ -74,8 +77,8 @@ export default function App() {
                 onOpenSettings={() => setDialog('settings')}
                 leftOpen={leftSheet}
                 rightOpen={rightSheet}
-                onToggleLeft={() => setState({ leftSheet: !leftSheet, rightSheet: false })}
-                onToggleRight={() => setState({ rightSheet: !rightSheet, leftSheet: false })}
+                onToggleLeft={() => ui().toggleSheet('left')}
+                onToggleRight={() => ui().toggleSheet('right')}
               />
             </main>
 
@@ -86,14 +89,14 @@ export default function App() {
 
             {/* ---- mobile sheet toggles live in the footer strip ---- */}
             {leftSheet && (
-              <MobileSheet side="left" onClose={() => setState({ leftSheet: false })} title="Layers">
+              <MobileSheet side="left" onClose={() => ui().closeSheet('left')} title="Layers">
                 <LayerPanel />
               </MobileSheet>
             )}
             {rightSheet && (
               <MobileSheet
                 side="right"
-                onClose={() => setState({ rightSheet: false })}
+                onClose={() => ui().closeSheet('right')}
                 title="Inspector"
               >
                 <Inspector />

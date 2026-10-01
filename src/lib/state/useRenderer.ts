@@ -1,45 +1,40 @@
-import { useEffect } from 'react'
-import { getState, setState } from './store'
-import { useStore } from './useStore'
-import { requestRender } from '../render/service'
-
 /**
- * Drives generation: whenever the project version bumps, request a render.
- * Requests are debounced (dragging a slider fires one render per tick) and the
- * render service coalesces anything that falls behind, so the UI never queues
- * up stale work.
+ * useRenderer — drives generation.
+ *
+ * The bridge between the document and the render loop: it watches
+ * `projectStore.version` and nothing else, because that counter is bumped by
+ * every change that invalidates the cached IR. Requests are debounced (dragging
+ * a slider fires one render per tick) and the render service coalesces anything
+ * that falls behind, so the UI never queues up stale work.
  */
+
+import { useEffect } from 'react'
+import { requestRender } from '../render/service'
+import { useProjectStore } from './projectStore'
+import { beginRender, failRender, finishRender, useRenderStore } from './renderStore'
+
+/** Debounce before asking for a render; collapses a slider drag into one pass. */
+const RENDER_DEBOUNCE_MS = 55
+
 export function useRenderer(): void {
-  const version = useStore((s) => s.version)
+  const version = useProjectStore((s) => s.version)
 
   useEffect(() => {
     let cancelled = false
-    setState({ generating: true, error: null })
+    beginRender()
     const timer = setTimeout(async () => {
-      const { project } = getState()
+      const { project } = useProjectStore.getState()
       try {
         const out = await requestRender(project, (p) => {
-          if (!cancelled) setState({ progress: p })
+          if (!cancelled) useRenderStore.setState({ progress: p })
         })
         if (cancelled) return
-        setState({
-          results: out.results,
-          resultsVersion: getState().resultsVersion + 1,
-          primitiveCount: out.count,
-          truncated: out.truncated,
-          renderMs: out.ms,
-          generating: false,
-          progress: null,
-        })
+        finishRender(out)
       } catch (err) {
         if (cancelled) return
-        setState({
-          generating: false,
-          progress: null,
-          error: err instanceof Error ? err.message : String(err),
-        })
+        failRender(err instanceof Error ? err.message : String(err))
       }
-    }, 55)
+    }, RENDER_DEBOUNCE_MS)
     return () => {
       cancelled = true
       clearTimeout(timer)

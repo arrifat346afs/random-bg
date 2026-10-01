@@ -13,7 +13,8 @@ import { useEffect } from 'react'
 import { isTyping } from '@/lib/keyboard'
 import { duplicateLayer } from '@/lib/project'
 import { randomise } from '@/lib/state/randomise'
-import { commit, getState, nudgeLayer, redo, setState, undo } from '@/lib/state/store'
+import { useProjectStore } from '@/lib/state/projectStore'
+import { useUiStore } from '@/lib/state/uiStore'
 
 /** Arrows nudge by 1px; Shift multiplies. The only precise way to place a layer. */
 const NUDGE = 1
@@ -33,28 +34,36 @@ export function useGlobalShortcuts(openDialog: (id: DialogId) => void): void {
       /* ---- modifier combos, all of which must not fall through ---- */
       if (mod && key === 'z') {
         e.preventDefault()
-        if (e.shiftKey) redo()
-        else undo()
+        if (e.shiftKey) useProjectStore.getState().redo()
+        else useProjectStore.getState().undo()
         return
       }
       if (mod && key === 'y') {
         e.preventDefault()
-        redo()
+        useProjectStore.getState().redo()
         return
       }
       if (mod && key === 'd') {
         e.preventDefault()
-        const s = getState()
+        const s = useProjectStore.getState()
         const idx = s.project.layers.findIndex((l) => l.id === s.selectedLayerId)
         if (idx >= 0) {
           const copy = duplicateLayer(s.project.layers[idx])
           const next = s.project.layers.slice()
           next.splice(idx + 1, 0, copy)
-          commit({ ...s.project, layers: next }, { select: copy.id })
+          useProjectStore.getState().commit({ ...s.project, layers: next }, { select: copy.id })
         }
         return
       }
       if (mod) return
+
+      /** Zoom about the current value, clamped. */
+      const zoomBy = (k: number) => {
+        const v = useUiStore.getState().view.zoom
+        useUiStore.getState().patchView({
+          zoom: Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, v * k)),
+        })
+      }
 
       switch (key) {
         case 'r':
@@ -71,7 +80,7 @@ export function useGlobalShortcuts(openDialog: (id: DialogId) => void): void {
           break
         case 'g':
           e.preventDefault()
-          setState({ gallery: null })
+          useUiStore.getState().setGallery(null)
           openDialog('gallery')
           break
         case ',':
@@ -88,30 +97,23 @@ export function useGlobalShortcuts(openDialog: (id: DialogId) => void): void {
           const step = e.shiftKey ? NUDGE_FAST : NUDGE
           const dx = key === 'arrowleft' ? -step : key === 'arrowright' ? step : 0
           const dy = key === 'arrowup' ? -step : key === 'arrowdown' ? step : 0
-          if (nudgeLayer(dx, dy)) e.preventDefault()
+          if (useProjectStore.getState().nudgeLayer(dx, dy)) e.preventDefault()
           break
         }
 
         case '0':
-          setState({ view: { ...getState().view, zoom: 1, panX: 0, panY: 0 } })
+          useUiStore.getState().patchView({ zoom: 1, panX: 0, panY: 0 })
           break
         case '=':
         case '+':
-          setState({
-            view: { ...getState().view, zoom: Math.min(ZOOM_MAX, getState().view.zoom * ZOOM_STEP) },
-          })
+          zoomBy(ZOOM_STEP)
           break
         case '-':
-          setState({
-            view: {
-              ...getState().view,
-              zoom: Math.max(ZOOM_MIN, getState().view.zoom / ZOOM_STEP),
-            },
-          })
+          zoomBy(1 / ZOOM_STEP)
           break
 
         case 'escape':
-          setState({ leftSheet: false, rightSheet: false })
+          useUiStore.getState().closeSheets()
           break
         case '?':
           openDialog('settings')

@@ -9,7 +9,9 @@ import { PanelLeft, PanelRight, Settings2 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
-import { useStore } from '@/lib/state/useStore'
+import { useProjectStore } from '@/lib/state/projectStore'
+import { useRenderStore } from '@/lib/state/renderStore'
+import { useUiStore } from '@/lib/state/uiStore'
 
 interface Props {
   onOpenSettings: () => void
@@ -26,9 +28,9 @@ export function ProjectStrip({
   onToggleLeft,
   onToggleRight,
 }: Props) {
-  const project = useStore((s) => s.project)
-  const generating = useStore((s) => s.generating)
-  const storageOk = useStore((s) => s.storageAvailable)
+  const project = useProjectStore((s) => s.project)
+  const generating = useRenderStore((s) => s.generating)
+  const storageOk = useUiStore((s) => s.storageAvailable)
 
   return (
     <footer className="flex h-9 shrink-0 items-center gap-2 border-t bg-background px-2 text-[11px] text-muted-foreground sm:gap-3 sm:px-3">

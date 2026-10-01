@@ -2,12 +2,10 @@
  * inspector/ColourTab.tsx — palette assignment and per-layer colour mapping.
  */
 
-import { useStore } from "@/lib/state/useStore"
 import type { Color } from "@/lib/ir"
 import { effectivePalette, isPaletteLinked } from "@/lib/palette"
 import { pushPaletteToAll, withProjectPalette } from "@/lib/project"
 import type { Layer } from "@/lib/schema"
-import { patchProject, updateLayer } from "@/lib/state/store"
 import { PaletteEditor } from "@/components/PaletteEditor"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
@@ -22,24 +20,25 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Link2, Unlink } from "lucide-react"
+import { useProjectStore } from '@/lib/state/projectStore'
 
 export function ColourTab({ layer }: { layer: Layer }) {
-  const projectPalette = useStore((s) => s.project.palette)
-  const linkedCount = useStore((s) => s.project.layers.filter((l) => isPaletteLinked(l.color)).length)
-  const layerCount = useStore((s) => s.project.layers.length)
+  const projectPalette = useProjectStore((s) => s.project.palette)
+  const linkedCount = useProjectStore((s) => s.project.layers.filter((l) => isPaletteLinked(l.color)).length)
+  const layerCount = useProjectStore((s) => s.project.layers.length)
   const linked = isPaletteLinked(layer.color)
   const shownPalette = linked
     ? projectPalette
     : layer.color.palette
 
   const setColor = (patch: Partial<Layer['color']>, coalesce?: string) =>
-    updateLayer(layer.id, (l) => ({ ...l, color: { ...l.color, ...patch } }), {
+    useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, color: { ...l.color, ...patch } }), {
       coalesce: coalesce ? `${layer.id}:c:${coalesce}` : undefined,
     })
 
   const setPaletteColors = (colors: Color[], name?: string) => {
     if (linked) {
-      patchProject((p) => withProjectPalette(p, colors, name ?? p.palette.name), {
+      useProjectStore.getState().patchProject((p) => withProjectPalette(p, colors, name ?? p.palette.name), {
         coalesce: `palette:global`,
       })
     } else {
@@ -48,7 +47,7 @@ export function ColourTab({ layer }: { layer: Layer }) {
   }
 
   const unlink = () =>
-    updateLayer(layer.id, (l) => ({
+    useProjectStore.getState().updateLayer(layer.id, (l) => ({
       ...l,
       color: {
         ...l.color,
@@ -58,12 +57,12 @@ export function ColourTab({ layer }: { layer: Layer }) {
     }))
 
   const relink = () =>
-    updateLayer(layer.id, (l) => ({
+    useProjectStore.getState().updateLayer(layer.id, (l) => ({
       ...l,
       color: { ...l.color, linked: true, palette: { ...projectPalette, colors: projectPalette.colors.slice() } },
     }))
 
-  const pushAll = () => patchProject((p) => pushPaletteToAll(p, layer.id))
+  const pushAll = () => useProjectStore.getState().patchProject((p) => pushPaletteToAll(p, layer.id))
 
   const modes: { value: Layer['color']['mode']; label: string; hint: string }[] = [
     { value: 'palette', label: 'Palette', hint: 'Sample colours straight from the ramp.' },

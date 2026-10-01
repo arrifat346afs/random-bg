@@ -9,7 +9,6 @@ import { effectivePalette } from "@/lib/palette"
 import { createRng } from "@/lib/rng"
 import { randomLayer } from "@/lib/randomize"
 import type { Layer } from "@/lib/schema"
-import { getState, updateLayer } from "@/lib/state/store"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
@@ -24,19 +23,20 @@ import {
   Trash2,
 } from "lucide-react"
 import { MiniToggle, ModSlider } from "./fields"
+import { useProjectStore } from '@/lib/state/projectStore'
 
 export function EffectsTab({ layer }: { layer: Layer }) {
   const [addOpen, setAddOpen] = useState(false)
 
   const setMod = (index: number, patch: Partial<Layer['mods'][number]>) =>
-    updateLayer(layer.id, (l) => {
+    useProjectStore.getState().updateLayer(layer.id, (l) => {
       const mods = l.mods.slice()
       mods[index] = { ...mods[index], ...patch }
       return { ...l, mods }
     })
 
   const move = (index: number, dir: -1 | 1) =>
-    updateLayer(layer.id, (l) => {
+    useProjectStore.getState().updateLayer(layer.id, (l) => {
       const mods = l.mods.slice()
       const to = index + dir
       if (to < 0 || to >= mods.length) return l
@@ -46,7 +46,7 @@ export function EffectsTab({ layer }: { layer: Layer }) {
     })
 
   const add = (type: Layer['mods'][number]['type']) => {
-    updateLayer(layer.id, (l) => {
+    useProjectStore.getState().updateLayer(layer.id, (l) => {
       if (l.mods.some((m) => m.type === type)) return l
       const def = MODIFIER_DEFS[type]
       return {
@@ -76,7 +76,7 @@ export function EffectsTab({ layer }: { layer: Layer }) {
               size="sm"
               variant="outline"
               onClick={() =>
-                updateLayer(layer.id, (l) => ({ ...l, seedOffset: l.seedOffset + 1 }))
+                useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, seedOffset: l.seedOffset + 1 }))
               }
             >
               +1
@@ -85,7 +85,7 @@ export function EffectsTab({ layer }: { layer: Layer }) {
               size="sm"
               variant="outline"
               onClick={() =>
-                updateLayer(layer.id, (l) => ({ ...l, seedOffset: l.seedOffset - 1 }))
+                useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, seedOffset: l.seedOffset - 1 }))
               }
             >
               −1
@@ -95,7 +95,7 @@ export function EffectsTab({ layer }: { layer: Layer }) {
               variant="outline"
               title="New random seed"
               onClick={() =>
-                updateLayer(layer.id, (l) => ({
+                useProjectStore.getState().updateLayer(layer.id, (l) => ({
                   ...l,
                   seedOffset: Math.floor(Math.random() * 100000),
                 }))
@@ -168,7 +168,7 @@ export function EffectsTab({ layer }: { layer: Layer }) {
                     </MiniToggle>
                     <MiniToggle
                       onClick={() =>
-                        updateLayer(layer.id, (l) => ({
+                        useProjectStore.getState().updateLayer(layer.id, (l) => ({
                           ...l,
                           mods: l.mods.filter((_, k) => k !== i),
                         }))
@@ -226,10 +226,10 @@ export function EffectsTab({ layer }: { layer: Layer }) {
           onClick={() => {
             const next = randomLayer({
               genId: layer.gen,
-              palette: effectivePalette(getState().project.palette, layer.color),
+              palette: effectivePalette(useProjectStore.getState().project.palette, layer.color),
               rng: createRng(Math.floor(Math.random() * 1e9)),
             })
-            updateLayer(layer.id, () => ({ ...layer, ...next, id: layer.id, name: layer.name }))
+            useProjectStore.getState().updateLayer(layer.id, () => ({ ...layer, ...next, id: layer.id, name: layer.name }))
           }}
         >
           <Dices /> Re-roll layer
@@ -238,7 +238,7 @@ export function EffectsTab({ layer }: { layer: Layer }) {
           size="sm"
           variant="outline"
           onClick={() => {
-            updateLayer(layer.id, (l) => ({ ...l, locks: {}, seedOffset: l.seedOffset + 7 }))
+            useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, locks: {}, seedOffset: l.seedOffset + 7 }))
           }}
         >
           <Palette /> Reseed + unlock

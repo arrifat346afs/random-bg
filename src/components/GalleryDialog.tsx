@@ -4,8 +4,6 @@ import { generateProject } from '@/lib/pipeline'
 import { compositeLayers } from '@/lib/export'
 import { renderCanvas } from '@/lib/render/canvas'
 import type { Project } from '@/lib/schema'
-import { applyProject, getState } from '@/lib/state/store'
-import { useStore } from '@/lib/state/useStore'
 import {
   Dialog,
   DialogContent,
@@ -16,6 +14,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Sparkles, RefreshCw, Check } from 'lucide-react'
+import { useProjectStore } from '@/lib/state/projectStore'
 
 interface Props {
   open: boolean
@@ -27,8 +26,8 @@ interface Props {
  * live thumbnails. Picking one re-parents the project; Ctrl+Z restores it.
  */
 export function GalleryDialog({ open, onOpenChange }: Props) {
-  const project = useStore((s) => s.project)
-  const [items, setItems] = useState<Project[]>(() => variations(getState().project, 9))
+  const project = useProjectStore((s) => s.project)
+  const [items, setItems] = useState<Project[]>(() => variations(useProjectStore.getState().project, 9))
   const [round, setRound] = useState(0)
 
   // Re-roll whenever the dialog opens (adjusted while rendering).
@@ -36,13 +35,13 @@ export function GalleryDialog({ open, onOpenChange }: Props) {
   if (prevOpen !== open) {
     setPrevOpen(open)
     if (open) {
-      setItems(variations(getState().project, 9))
+      setItems(variations(useProjectStore.getState().project, 9))
       setRound((r) => r + 1)
     }
   }
 
   const regenerate = () => {
-    setItems(variations(getState().project, 9))
+    setItems(variations(useProjectStore.getState().project, 9))
     setRound((r) => r + 1)
   }
 
@@ -74,7 +73,7 @@ export function GalleryDialog({ open, onOpenChange }: Props) {
               project={p}
               index={i}
               onPick={() => {
-                applyProject(p)
+                useProjectStore.getState().applyProject(p)
                 onOpenChange(false)
               }}
             />

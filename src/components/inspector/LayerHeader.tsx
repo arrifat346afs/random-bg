@@ -7,7 +7,6 @@ import { useState } from "react"
 import { getGenerator } from "@/lib/generators"
 import { BLEND_MODES, type BlendMode } from "@/lib/ir"
 import type { Layer } from "@/lib/schema"
-import { updateLayer } from "@/lib/state/store"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -21,6 +20,7 @@ import {
 } from "@/components/ui/select"
 import { Eye, EyeOff, Lock, LockOpen } from "lucide-react"
 import { MiniToggle } from "./fields"
+import { useProjectStore } from '@/lib/state/projectStore'
 
 /* ---- header --------------------------------------------------------------- */
 
@@ -30,7 +30,7 @@ export function LayerHeader({ layer }: { layer: Layer }) {
   const [draft, setDraft] = useState(layer.name)
 
   const toggle = (key: 'visible' | 'locked' | 'solo') =>
-    updateLayer(layer.id, (l) => ({ ...l, [key]: !l[key] }))
+    useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, [key]: !l[key] }))
 
   return (
     <div className="border-b p-2.5">
@@ -42,7 +42,7 @@ export function LayerHeader({ layer }: { layer: Layer }) {
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onBlur={() => {
-                updateLayer(layer.id, (l) => ({ ...l, name: draft.trim() || l.name }))
+                useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, name: draft.trim() || l.name }))
                 setRenaming(false)
               }}
               onKeyDown={(e) => {
@@ -101,7 +101,7 @@ export function LayerHeader({ layer }: { layer: Layer }) {
             step={0.01}
             disabled={layer.locked}
             onValueChange={([v]) =>
-              updateLayer(layer.id, (l) => ({ ...l, opacity: v }), {
+              useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, opacity: v }), {
                 coalesce: `${layer.id}:opacity`,
               })
             }
@@ -113,7 +113,7 @@ export function LayerHeader({ layer }: { layer: Layer }) {
             value={layer.blend}
             disabled={layer.locked}
             onValueChange={(v) =>
-              updateLayer(layer.id, (l) => ({ ...l, blend: v as BlendMode }))
+              useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, blend: v as BlendMode }))
             }
           >
             <SelectTrigger className="h-7 text-[11px]" aria-label="Blend mode">

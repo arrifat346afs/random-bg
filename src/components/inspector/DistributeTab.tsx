@@ -6,7 +6,6 @@
 import { createRng, hash32 } from "@/lib/rng"
 import { randomDist } from "@/lib/randomize"
 import { DIST_OPTIONS, type DistSpec, type Layer } from "@/lib/schema"
-import { getState, updateLayer } from "@/lib/state/store"
 import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { Separator } from "@/components/ui/separator"
@@ -20,12 +19,13 @@ import {
 import { Info, Shuffle } from "lucide-react"
 import { DIST_FIELDS, SHAPE_FIELDS } from "./schema"
 import { DistNumField, MaskPicker } from "./fields"
+import { useProjectStore } from '@/lib/state/projectStore'
 
 export function DistributeTab({ layer }: { layer: Layer }) {
-  const rng = createRng(hash32(getState().project.seed, layer.id, layer.seedOffset, 'dist'))
+  const rng = createRng(hash32(useProjectStore.getState().project.seed, layer.id, layer.seedOffset, 'dist'))
 
   const setDist = (patch: Partial<DistSpec>, coalesce?: string) =>
-    updateLayer(layer.id, (l) => ({ ...l, dist: { ...l.dist, ...patch } }), {
+    useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, dist: { ...l.dist, ...patch } }), {
       coalesce: coalesce ? `${layer.id}:${coalesce}` : undefined,
     })
 

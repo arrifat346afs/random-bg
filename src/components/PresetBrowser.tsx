@@ -2,8 +2,6 @@ import { useMemo, useState } from 'react'
 import { PRESETS, ALL_PRESET_TAGS, buildPreset, type PresetDef } from '@/lib/presets'
 import { getGenerator } from '@/lib/generators'
 import { PRESET_PALETTES } from '@/lib/palette'
-import { getState, applyProject, saveUserPreset, deleteUserPreset, setState } from '@/lib/state/store'
-import { useStore } from '@/lib/state/useStore'
 import {
   Dialog,
   DialogContent,
@@ -17,6 +15,9 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Search, Trash2, Save, Sparkles, ImageOff, FolderOpen } from 'lucide-react'
+import { useRenderStore } from '@/lib/state/renderStore'
+import { useLibraryStore } from '@/lib/state/libraryStore'
+import { useProjectStore } from '@/lib/state/projectStore'
 
 interface Props {
   open: boolean
@@ -25,7 +26,7 @@ interface Props {
 
 /** Searchable, tagged browser for the 38 built-in presets + user presets. */
 export function PresetBrowser({ open, onOpenChange }: Props) {
-  const userPresets = useStore((s) => s.userPresets)
+  const userPresets = useLibraryStore((s) => s.userPresets)
   const [q, setQ] = useState('')
   const [tag, setTag] = useState<string | null>(null)
 
@@ -44,13 +45,13 @@ export function PresetBrowser({ open, onOpenChange }: Props) {
 
   const load = (p: PresetDef) => {
     const proj = buildPreset(p)
-    applyProject(proj)
+    useProjectStore.getState().applyProject(proj)
     onOpenChange(false)
   }
 
   const saveCurrent = () => {
-    const name = getState().project.name || 'Untitled'
-    saveUserPreset(name, getState().project.layers.map((l) => l.gen).slice(0, 4))
+    const name = useProjectStore.getState().project.name || 'Untitled'
+    useLibraryStore.getState().saveUserPreset(name, useProjectStore.getState().project.layers.map((l) => l.gen).slice(0, 4))
   }
 
   return (
@@ -137,7 +138,7 @@ export function PresetBrowser({ open, onOpenChange }: Props) {
                       <button
                         className="min-w-0 flex-1 text-left"
                         onClick={() => {
-                          applyProject(structuredClone(p.project))
+                          useProjectStore.getState().applyProject(structuredClone(p.project))
                           onOpenChange(false)
                         }}
                       >
@@ -154,7 +155,7 @@ export function PresetBrowser({ open, onOpenChange }: Props) {
                         size="icon-sm"
                         variant="ghost"
                         aria-label="Delete saved preset"
-                        onClick={() => deleteUserPreset(p.id)}
+                        onClick={() => useLibraryStore.getState().deleteUserPreset(p.id)}
                       >
                         <Trash2 />
                       </Button>
@@ -223,10 +224,10 @@ function ImportPresetsButton() {
           if (!file) return
           try {
             const text = await file.text()
-            const res = (await import('@/lib/state/store')).importUserPresets(text)
-            setState({ error: res.ok ? null : res.error ?? 'Import failed' })
+            const res = useLibraryStore.getState().importUserPresets(text)
+            useRenderStore.setState({ error: res.ok ? null : (res.error ?? 'Import failed') })
           } catch (err) {
-            setState({ error: err instanceof Error ? err.message : 'Import failed' })
+            useRenderStore.setState({ error: err instanceof Error ? err.message : 'Import failed' })
           }
         }
         input.click()

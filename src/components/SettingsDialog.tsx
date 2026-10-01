@@ -4,8 +4,6 @@ import {
   type BackgroundSpec,
   type MotionSpec,
 } from '@/lib/schema'
-import { patchProject, applyProject } from '@/lib/state/store'
-import { useStore } from '@/lib/state/useStore'
 import {
   Dialog,
   DialogContent,
@@ -19,6 +17,7 @@ import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { useProjectStore } from '@/lib/state/projectStore'
 
 interface Props {
   open: boolean
@@ -26,7 +25,7 @@ interface Props {
 }
 
 export function SettingsDialog({ open, onOpenChange }: Props) {
-  const project = useStore((s) => s.project)
+  const project = useProjectStore((s) => s.project)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -54,7 +53,7 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
                     <button
                       key={s.label}
                       onClick={() =>
-                        patchProject((p) => ({ ...p, canvas: { ...p.canvas, w: s.w, h: s.h } }))
+                        useProjectStore.getState().patchProject((p) => ({ ...p, canvas: { ...p.canvas, w: s.w, h: s.h } }))
                       }
                       className={`rounded-md border px-1.5 py-1.5 text-[10px] leading-tight transition-colors ${
                         project.canvas.w === s.w && project.canvas.h === s.h
@@ -77,14 +76,14 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
                   value={project.canvas.w}
                   min={16}
                   max={8192}
-                  onChange={(w) => patchProject((p) => ({ ...p, canvas: { ...p.canvas, w } }))}
+                  onChange={(w) => useProjectStore.getState().patchProject((p) => ({ ...p, canvas: { ...p.canvas, w } }))}
                 />
                 <NumField
                   label="Height"
                   value={project.canvas.h}
                   min={16}
                   max={8192}
-                  onChange={(h) => patchProject((p) => ({ ...p, canvas: { ...p.canvas, h } }))}
+                  onChange={(h) => useProjectStore.getState().patchProject((p) => ({ ...p, canvas: { ...p.canvas, h } }))}
                 />
               </div>
 
@@ -96,7 +95,7 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
                   id="pname"
                   value={project.name}
                   onChange={(e) =>
-                    patchProject((p) => ({ ...p, name: e.target.value }), {
+                    useProjectStore.getState().patchProject((p) => ({ ...p, name: e.target.value }), {
                       coalesce: 'name',
                     })
                   }
@@ -120,7 +119,7 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
                     layers: [],
                     name: 'Untitled effect',
                   })
-                  applyProject(next)
+                  useProjectStore.getState().applyProject(next)
                 }}
               >
                 New empty project
@@ -187,10 +186,10 @@ function NumField({
 }
 
 function BackgroundEditor() {
-  const bg = useStore((s) => s.project.canvas.bg)
+  const bg = useProjectStore((s) => s.project.canvas.bg)
 
   const set = (next: BackgroundSpec) =>
-    patchProject((p) => ({ ...p, canvas: { ...p.canvas, bg: next } }))
+    useProjectStore.getState().patchProject((p) => ({ ...p, canvas: { ...p.canvas, bg: next } }))
 
   const kinds: { value: BackgroundSpec['kind']; label: string }[] = [
     { value: 'transparent', label: 'Transparent' },
@@ -319,7 +318,7 @@ function ColorRow({
 }
 
 function MotionField({ k, label, hint }: { k: keyof MotionSpec; label: string; hint: string }) {
-  const value = useStore((s) => s.project.motion[k])
+  const value = useProjectStore((s) => s.project.motion[k])
   return (
     <div className="py-1">
       <div className="mb-1 flex items-center justify-between">
@@ -336,7 +335,7 @@ function MotionField({ k, label, hint }: { k: keyof MotionSpec; label: string; h
         step={0.01}
         value={value}
         onChange={(e) =>
-          patchProject(
+          useProjectStore.getState().patchProject(
             (p) => ({ ...p, motion: { ...p.motion, [k]: Number(e.target.value) } }),
             { coalesce: `motion:${k}` },
           )

@@ -8,7 +8,6 @@ import { getGenerator } from "@/lib/generators"
 import { createRng, hash32 } from "@/lib/rng"
 import { randomParamValue, randomizeParams } from "@/lib/randomize"
 import type { Layer, ParamDef, ParamValue } from "@/lib/schema"
-import { getState, updateLayer } from "@/lib/state/store"
 import { ParamField } from "@/components/ParamField"
 import { Button } from "@/components/ui/button"
 import {
@@ -19,6 +18,7 @@ import {
 } from "@/components/ui/accordion"
 import { Dices } from "lucide-react"
 import { SECTION_LABELS } from "./schema"
+import { useProjectStore } from '@/lib/state/projectStore'
 
 export function ParamsTab({ layer }: { layer: Layer }) {
   const gen = getGenerator(layer.gen)
@@ -42,17 +42,17 @@ export function ParamsTab({ layer }: { layer: Layer }) {
     return layer.params[def.when.key] === def.when.equals
   }
 
-  const rng = createRng(hash32(getState().project.seed, layer.id, layer.seedOffset, 'param'))
+  const rng = createRng(hash32(useProjectStore.getState().project.seed, layer.id, layer.seedOffset, 'param'))
 
   const setValue = (key: string, v: ParamValue) =>
-    updateLayer(
+    useProjectStore.getState().updateLayer(
       layer.id,
       (l) => ({ ...l, params: { ...l.params, [key]: v } }),
       { coalesce: `${layer.id}:${key}` },
     )
 
   const setLock = (key: string) =>
-    updateLayer(layer.id, (l) => {
+    useProjectStore.getState().updateLayer(layer.id, (l) => {
       const locks = { ...l.locks }
       if (locks[key]) delete locks[key]
       else locks[key] = true
@@ -72,7 +72,7 @@ export function ParamsTab({ layer }: { layer: Layer }) {
       layer.params,
       layer.locks,
     )
-    updateLayer(layer.id, (l) => ({ ...l, params, locks }))
+    useProjectStore.getState().updateLayer(layer.id, (l) => ({ ...l, params, locks }))
   }
 
   return (

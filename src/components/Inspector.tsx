@@ -7,14 +7,15 @@
  */
 
 import { Sparkles } from 'lucide-react'
-import { useStore } from '@/lib/state/useStore'
-import { setState } from '@/lib/state/store'
+
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ColourTab } from './inspector/ColourTab'
 import { DistributeTab } from './inspector/DistributeTab'
 import { EffectsTab } from './inspector/EffectsTab'
 import { ParamsTab } from './inspector/ParamsTab'
 import { LayerHeader } from './inspector/LayerHeader'
+import { useProjectStore } from '@/lib/state/projectStore'
+import { useUiStore } from '@/lib/state/uiStore'
 
 const EMPTY = (
   <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
@@ -27,8 +28,8 @@ const EMPTY = (
 )
 
 export function Inspector() {
-  const layer = useStore((s) => s.project.layers.find((l) => l.id === s.selectedLayerId) ?? null)
-  const tab = useStore((s) => s.inspectorTab)
+  const layer = useProjectStore((s) => s.project.layers.find((l) => l.id === s.selectedLayerId) ?? null)
+  const tab = useUiStore((s) => s.inspectorTab)
 
   if (!layer) return EMPTY
 
@@ -37,7 +38,7 @@ export function Inspector() {
       <LayerHeader layer={layer} />
       <Tabs
         value={tab}
-        onValueChange={(v) => setState({ inspectorTab: v as typeof tab })}
+        onValueChange={(v) => useUiStore.getState().setInspectorTab(v as typeof tab)}
         className="flex min-h-0 flex-1 flex-col"
       >
         <div className="px-2 pt-2">

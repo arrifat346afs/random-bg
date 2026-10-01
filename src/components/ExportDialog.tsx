@@ -11,7 +11,6 @@ import {
   supportsWebM,
   type ExportFormat,
 } from '@/lib/export'
-import { useStore } from '@/lib/state/useStore'
 import {
   Dialog,
   DialogContent,
@@ -36,6 +35,8 @@ import {
   Check,
   AlertTriangle,
 } from 'lucide-react'
+import { useProjectStore } from '@/lib/state/projectStore'
+import { useRenderStore } from '@/lib/state/renderStore'
 
 interface Props {
   open: boolean
@@ -52,8 +53,8 @@ const FORMATS: { value: ExportFormat; label: string; icon: React.ReactNode; hint
 ]
 
 export function ExportDialog({ open, onOpenChange }: Props) {
-  const project = useStore((s) => s.project)
-  const results = useStore((s) => s.results)
+  const project = useProjectStore((s) => s.project)
+  const results = useRenderStore((s) => s.results)
   const [format, setFormat] = useState<ExportFormat>('png')
   const [scale, setScale] = useState(2)
   const [quality, setQuality] = useState(0.92)
