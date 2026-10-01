@@ -1,0 +1,79 @@
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const work = async () => {
+    const [presets, svc, ex] = await Promise.all([
+      import('/src/lib/presets.ts'),
+      import('/src/lib/render/service.ts'),
+      import('/src/lib/export.ts'),
+    ])
+    const decode = async (blob) => {
+      const url = URL.createObjectURL(blob)
+      const img = new Image()
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url })
+      const c = document.createElement('canvas')
+      c.width = img.width; c.height = img.height
+      const g = c.getContext('2d', { willReadFrequently: true })
+      g.clearRect(0, 0, c.width, c.height)
+      g.drawImage(img, 0, 0)
+      const data = g.getImageData(0, 0, c.width, c.height).data
+      URL.revokeObjectURL(url)
+      return { data, w: c.width, h: c.height }
+    }
+
+    const report = (id, data, w, h) => {
+      let n = 0, semi = 0, fringe = 0, pureBlack = 0, tinted = 0
+      let sumRGBOfSemi = 0
+      // 4x4 spatial grid of fringe, to see whether it hugs the border
+      const GX = 4, GY = 4
+      const grid = Array.from({ length: GX }, () => new Array(GY).fill(0))
+      const gridN = Array.from({ length: GX }, () => new Array(GY).fill(0))
+      for (let i = 0; i < data.length; i += 4) {
+        const a = data[i + 3]
+        if (!a) continue
+        n++
+        const px = ((i / 4) % w), py = Math.floor(i / 4 / w)
+        if (a < 96) {
+          semi++
+          const r = data[i], g = data[i + 1], b = data[i + 2]
+          sumRGBOfSemi += r + g + b
+          const gx = Math.min(GX - 1, Math.floor((px / w) * GX))
+          const gy = Math.min(GY - 1, Math.floor((py / h) * GY))
+          gridN[gx][gy]++
+          if (r + g + b < 40) {
+            fringe++
+            grid[gx][gy]++
+            if (r === 0 && g === 0 && b === 0) pureBlack++
+            else tinted++
+          }
+        }
+      }
+      return {
+        id,
+        nonZero: n,
+        semi,
+        fringePct: semi ? +((fringe / semi) * 100).toFixed(2) : 0,
+        pureBlackPct: semi ? +((pureBlack / semi) * 100).toFixed(2) : 0,
+        tintedNearBlack: tinted,
+        meanSumRGBofSemi: semi ? Math.round(sumRGBOfSemi / semi) : 0,
+        gridFringe: grid.map((col, x) => col.map((v, y) => (gridN[x][y] ? Math.round((v / gridN[x][y]) * 100) : 0))),
+      }
+    }
+
+    const out = []
+    for (const id of ['gold-dust', 'blue-glitter-bokeh', 'sparkle-rain', 'spiral-galaxy']) {
+      const p = presets.PRESETS.find((x) => x.id === id)
+      if (!p) { out.push({ id, missing: true }); continue }
+      const proj = presets.buildPreset(p)
+      proj.canvas.bg = { kind: 'transparent' }
+      const r = await svc.requestRender(proj, () => {})
+      const exp = await ex.exportProject(proj, r.results, {
+        format: 'png', scale: 1, includeBackground: false, quality: 0.92,
+      })
+      if (!exp.blob) { out.push({ id, noBlob: true, w: exp.warnings }); continue }
+      const { data, w, h } = await decode(exp.blob)
+      out.push(report(id, data, w, h))
+    }
+    return JSON.stringify(out, null, 1)
+  }
+  return Promise.race([work(), sleep(120000).then(() => 'TIMEOUT-120s')])
+})()

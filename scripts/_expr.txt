@@ -1,0 +1,83 @@
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const done = []
+  window.__fxDone = done
+  const work = async () => {
+    const [store, presets] = await Promise.all([
+      import('/src/lib/state/store.ts'),
+      import('/src/lib/presets.ts'),
+    ])
+    const frame = () => new Promise((r) => requestAnimationFrame(() => r(performance.now())))
+
+    const load = async (id) => {
+      const p = presets.PRESETS.find((x) => x.id === id)
+      if (!p) return null
+      const t0 = performance.now()
+      store.applyProject(presets.buildPreset(p))
+      await frame()
+      await frame()
+      let worst = 0
+      let prev = performance.now()
+      let guard = 0
+      let frames = 0
+      while (store.getState().generating && guard < 300) {
+        const now = await frame()
+        frames++
+        worst = Math.max(worst, now - prev)
+        prev = now
+        guard++
+      }
+      for (let i = 0; i < 5; i++) {
+        const now = await frame()
+        worst = Math.max(worst, now - prev)
+        prev = now
+      }
+      return {
+        id,
+        waitFrames: frames,
+        totalMs: Math.round(performance.now() - t0),
+        worstFrameMs: Math.round(worst),
+        prims: store.getState().primitiveCount,
+      }
+    }
+
+    for (const id of [
+      'spiral-galaxy',
+      'prism-spirograph',
+      'rain-on-lens',
+      'aurora-veil',
+      'diamond-dust',
+      'gold-dust',
+      'sunset-light-trails',
+      'sandstorm-dust',
+      'vapor-bloom',
+    ]) {
+      done.push(await load(id))
+    }
+
+    const zoom = async () => {
+      const ds = []
+      let prev = performance.now()
+      for (let i = 0; i < 60; i++) {
+        const now = await frame()
+        ds.push(now - prev)
+        prev = now
+        if (i % 6 === 0) {
+          const s = store.getState()
+          store.setState({ view: { ...s.view, zoom: 1 + i * 0.05, panX: i * 3 } })
+        }
+      }
+      ds.sort((a, b) => a - b)
+      return { p50: +ds[30].toFixed(1), p90: +ds[54].toFixed(1), max: +ds[59].toFixed(1) }
+    }
+    const z = await zoom()
+    const heapMB = performance.memory
+      ? Math.round(performance.memory.usedJSHeapSize / 1048576)
+      : null
+    return JSON.stringify({ done, zoom: z, heapMB }, null, 1)
+  }
+  return Promise.race([
+    work(),
+    sleep(80000).then(() => 'PARTIAL:' + JSON.stringify({ done, gen: window.__fxGen ?? null })),
+  ])
+})()

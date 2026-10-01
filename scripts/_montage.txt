@@ -1,0 +1,79 @@
+(async () => {
+  const [rz, svc, ex, cvmod] = await Promise.all([
+    import('/src/lib/randomize.ts'),
+    import('/src/lib/render/service.ts'),
+    import('/src/lib/export.ts'),
+    import('/src/lib/render/canvas.ts'),
+  ])
+  const COLS = 5, ROWS = 4, CW = 320, CH = 214
+  const sheet = document.createElement('canvas')
+  sheet.width = COLS * CW
+  sheet.height = ROWS * CH
+  sheet.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:2147483647;object-fit:contain;background:#0b0b0f'
+  document.body.appendChild(sheet)
+  const g = sheet.getContext('2d')
+  g.fillStyle = '#0b0b0f'
+  g.fillRect(0, 0, sheet.width, sheet.height)
+
+  const metrics = []
+  for (let i = 0; i < COLS * ROWS; i++) {
+    const seed = 1000 + i * 7919
+    const p = rz.randomProject(seed)
+    const out = await svc.requestRender(p, () => {})
+    const ir = ex.compositeLayers(out.results, p.canvas.w, p.canvas.h)
+    const off = document.createElement('canvas')
+    cvmod.renderCanvas(ir, off, { scale: Math.min(1, 640 / Math.max(p.canvas.w, p.canvas.h)) })
+
+    // objective quality read of this project
+    const tmp = document.createElement('canvas')
+    tmp.width = 160; tmp.height = 160
+    const tg = tmp.getContext('2d', { willReadFrequently: true })
+    tg.fillStyle = '#000'
+    tg.fillRect(0, 0, 160, 160)
+    tg.drawImage(off, 0, 0, 160, 160)
+    const d = tg.getImageData(0, 0, 160, 160).data
+    let sum = 0, sum2 = 0, cov = 0, blown = 0, chromaSum = 0, chromaSum2 = 0, n = 0
+    for (let k = 0; k < d.length; k += 4) {
+      const r = d[k], gg = d[k + 1], b = d[k + 2]
+      const l = 0.2126 * r + 0.7152 * gg + 0.0722 * b
+      sum += l; sum2 += l * l; n++
+      if (l > 40) cov++
+      if (l > 250) blown++
+      const c = Math.max(r, gg, b) - Math.min(r, gg, b)
+      chromaSum += c; chromaSum2 += c * c
+    }
+    const mean = sum / n
+    const sd = Math.sqrt(Math.max(0, sum2 / n - mean * mean))
+    const cm = chromaSum / n
+    const csd = Math.sqrt(Math.max(0, chromaSum2 / n - cm * cm))
+    metrics.push({
+      i, seed, layers: p.layers.length, prims: out.count,
+      name: p.name || '(random)',
+      coverage: +((cov / n) * 100).toFixed(1),
+      meanLuma: +mean.toFixed(1),
+      contrast: +sd.toFixed(1),
+      colorfulness: +(cm + csd).toFixed(1),
+      blownPct: +((blown / n) * 100).toFixed(2),
+    })
+
+    // draw the cell
+    const cx = (i % COLS) * CW
+    const cy = Math.floor(i / COLS) * CH
+    const scale = Math.min((CW - 8) / off.width, (CH - 26) / off.height)
+    const dw = off.width * scale, dh = off.height * scale
+    g.drawImage(off, cx + (CW - dw) / 2, cy + (CH - 26 - dh) / 2 + 4, dw, dh)
+    g.fillStyle = 'rgba(0,0,0,0.72)'
+    g.fillRect(cx, cy + CH - 22, CW, 22)
+    g.fillStyle = '#e8e8ef'
+    g.font = '12px system-ui, sans-serif'
+    g.fillText('#' + i + '  ' + p.name, cx + 7, cy + CH - 7)
+    g.fillStyle = '#8f8fa5'
+    g.font = '11px system-ui, sans-serif'
+    const m = metrics[i]
+    g.fillText(m.contrast + '·' + m.coverage + '%·c' + m.colorfulness, cx + CW - 108, cy + CH - 7)
+    // cell frame
+    g.strokeStyle = 'rgba(255,255,255,0.10)'
+    g.strokeRect(cx + 0.5, cy + 0.5, CW - 1, CH - 1)
+  }
+  return JSON.stringify({ count: metrics.length, metrics })
+})()

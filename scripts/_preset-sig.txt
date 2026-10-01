@@ -1,0 +1,47 @@
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const work = async () => {
+    const [presets, svc, ex, cvmod] = await Promise.all([
+      import('/src/lib/presets.ts'),
+      import('/src/lib/render/service.ts'),
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/canvas.ts'),
+    ])
+    const out = {}
+    for (const def of presets.PRESETS) {
+      const p = presets.buildPreset(def)
+      const r = await svc.requestRender(p, () => {})
+      const ir = ex.compositeLayers(r.results, p.canvas.w, p.canvas.h)
+      const S = 64
+      const c = document.createElement('canvas')
+      c.width = S
+      c.height = S
+      cvmod.renderCanvas(ir, c, { scale: S / p.canvas.w })
+      const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, S, S).data
+      // 8x8 block means of RGBA — a coarse but stable visual fingerprint
+      const sig = []
+      const B = S / 8
+      for (let by = 0; by < 8; by++) {
+        for (let bx = 0; bx < 8; bx++) {
+          let ar = 0, ag = 0, ab = 0, aa = 0
+          for (let y = by * B; y < (by + 1) * B; y++) {
+            for (let x = bx * B; x < (bx + 1) * B; x++) {
+              const i = (y * S + x) * 4
+              ar += d[i]; ag += d[i + 1]; ab += d[i + 2]; aa += d[i + 3]
+            }
+          }
+          const n = B * B
+          sig.push(Math.round(ar / n), Math.round(ag / n), Math.round(ab / n), Math.round(aa / n))
+        }
+      }
+      // per-layer node counts pin down *which* layer changed
+      out[def.id] = {
+        nodes: r.count,
+        layers: r.results.map((x) => x.ir.nodes.length),
+        sig,
+      }
+    }
+    return JSON.stringify(out)
+  }
+  return Promise.race([work(), sleep(120000).then(() => 'TIMEOUT-120s')])
+})()

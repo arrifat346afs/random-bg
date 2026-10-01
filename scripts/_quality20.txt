@@ -1,0 +1,152 @@
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const work = async () => {
+    const [q, ex, cv, svc] = await Promise.all([
+      import('/src/lib/quality.ts'),
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/canvas.ts'),
+      import('/src/lib/render/service.ts'),
+    ])
+
+    const N = 20
+    const BASE = 0x5eed1234
+    const rows = []
+    const projects = []
+
+    /* ---- 1. run the gate over 20 fixed seeds --------------------------- */
+    for (let i = 0; i < N; i++) {
+      const seed = (BASE + i * 7919) >>> 0
+      const seen = []
+      let res
+      try {
+        res = await q.randomProjectChecked(
+          seed,
+          { attempts: 8, budgetMs: 750 },
+          () => {},
+          (x) =>
+            seen.push({
+              attempt: x.attempt,
+              ok: x.verdict.ok,
+              score: Math.round(x.verdict.score),
+              cov: +x.metrics.coverage.toFixed(2),
+              luma: +x.metrics.meanLuma.toFixed(1),
+              white: +x.metrics.whiteShare.toFixed(1),
+              contrast: +x.metrics.contrast.toFixed(1),
+              nodes: x.metrics.nodes,
+              hard: x.verdict.hard.map((r) => r.code),
+              soft: x.verdict.soft.map((r) => r.code),
+            }),
+        )
+      } catch (e) {
+        rows.push({ i, seed, error: String(e && e.message ? e.message : e) })
+        await sleep(0)
+        continue
+      }
+
+      rows.push({
+        i,
+        seed,
+        attempts: res.attempts,
+        budgetHit: res.budgetHit,
+        firstOk: seen.length ? seen[0].ok : null,
+        firstCov: seen.length ? seen[0].cov : null,
+        firstLuma: seen.length ? seen[0].luma : null,
+        firstWhite: seen.length ? seen[0].white : null,
+        firstContrast: seen.length ? seen[0].contrast : null,
+        firstNodes: seen.length ? seen[0].nodes : null,
+        firstHard: seen.length ? seen[0].hard : [],
+        firstSoft: seen.length ? seen[0].soft : [],
+        finalOk: res.verdict.ok,
+        score: Math.round(res.verdict.score),
+        cov: +res.metrics.coverage.toFixed(2),
+        luma: +res.metrics.meanLuma.toFixed(1),
+        white: +res.metrics.whiteShare.toFixed(2),
+        contrast: +res.metrics.contrast.toFixed(1),
+        nodes: res.metrics.nodes,
+        bg: res.project.canvas.bg.kind,
+        hard: res.verdict.hard.map((r) => r.code),
+        soft: res.verdict.soft.map((r) => r.code),
+        rolls: seen.length,
+        reasons: res.verdict.hard.concat(res.verdict.soft).map((r) => r.code + ': ' + r.why),
+      })
+      projects.push(res.project)
+      await sleep(0)
+    }
+
+    /* ---- 2. contact sheet --------------------------------------------- */
+    const COLS = 4
+    const TW = 300
+    const TH = 186
+    const PAD = 8
+    const LABEL = 17
+    const HEADER = 34
+    const cw = TW + PAD * 2
+    const ch = TH + LABEL + PAD * 2
+    const rowCount = Math.ceil(Math.max(1, projects.length) / COLS)
+    const sheet = document.createElement('canvas')
+    sheet.width = cw * COLS
+    sheet.height = HEADER + ch * rowCount
+    const g = sheet.getContext('2d')
+    g.fillStyle = '#14141a'
+    g.fillRect(0, 0, sheet.width, sheet.height)
+    g.fillStyle = '#e8e8ee'
+    g.font = 'bold 15px ui-monospace, monospace'
+    g.fillText('FX Forge — 20 random projects (quality gate)', 12, 22)
+
+    for (let i = 0; i < projects.length; i++) {
+      const p = projects[i]
+      const row = rows[i] || {}
+      const cx = (i % COLS) * cw
+      const cy = HEADER + Math.floor(i / COLS) * ch
+
+      // cell ground: opaque projects bring their own, transparent ones need one
+      g.fillStyle = '#0c0c11'
+      g.fillRect(cx + PAD, cy + PAD, TW, TH)
+
+      try {
+        const out = await svc.requestRender(p, () => {})
+        const ir = ex.compositeLayers(out.results, p.canvas.w, p.canvas.h)
+        const sc = Math.min(TW / ir.w, TH / ir.h)
+        const c = document.createElement('canvas')
+        cv.renderCanvas(ir, c, { scale: sc })
+        g.drawImage(
+          c,
+          Math.round(cx + PAD + (TW - c.width) / 2),
+          Math.round(cy + PAD + (TH - c.height) / 2),
+        )
+      } catch (e) {
+        g.fillStyle = '#ff6b6b'
+        g.font = '12px ui-monospace, monospace'
+        g.fillText('render failed', cx + PAD + 8, cy + PAD + 20)
+      }
+
+      // frame + label
+      g.strokeStyle = row.finalOk ? '#2f9e5f' : '#c0392b'
+      g.lineWidth = 2
+      g.strokeRect(cx + PAD + 1, cy + PAD + 1, TW - 2, TH - 2)
+      g.fillStyle = '#b9b9c6'
+      g.font = '11px ui-monospace, monospace'
+      const tag =
+        '#' +
+        (i + 1) +
+        '  ' +
+        (row.finalOk ? 'PASS' : 'FAIL') +
+        '  try ' +
+        (row.firstOk ? '1st' : String(row.attempts || '?')) +
+        '  cov ' +
+        (row.cov != null ? row.cov.toFixed(1) : '?') +
+        '%  lum ' +
+        (row.luma != null ? Math.round(row.luma) : '?') +
+        '  n ' +
+        (row.nodes != null ? row.nodes : '?') +
+        '  ' +
+        (row.bg || '')
+      g.fillText(tag, cx + PAD, cy + PAD + TH + 13)
+    }
+
+    return JSON.stringify({ rows, png: sheet.toDataURL('image/png') })
+  }
+
+  return Promise.race([work(), sleep(300000).then(() => 'TIMEOUT-300s')])
+})()
