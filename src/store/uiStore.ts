@@ -424,8 +424,17 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setRolling: (rolling) => set({ rolling }),
 
   patchExport: (patch) => set(patch),
+  /**
+   * Called during the dialog's render to clear a stale result when it re-opens
+   * or the format changes. Guarded on the epoch so a repeat call is a no-op —
+   * an unguarded write here would notify from inside render.
+   */
   resetExportTransient: (exportEpoch) =>
-    set({ exportEpoch, exportStatus: null, exportFallback: null, exportProgress: 0 }),
+    set((s) =>
+      Object.is(s.exportEpoch, exportEpoch)
+        ? s
+        : { exportEpoch, exportStatus: null, exportFallback: null, exportProgress: 0 },
+    ),
 
   setGallery: (gallery) => set({ gallery }),
 
@@ -443,8 +452,12 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   resetGalleryCardStatus: (index) =>
     set((s) => ({ galleryCardStatus: { ...s.galleryCardStatus, [index]: 'loading' } })),
 
+  /** Equality-checked for the same reason as `setRefs` — see there. */
   setGalleryCardRef: (index, el) =>
-    set((s) => ({ galleryCardRefs: { ...s.galleryCardRefs, [index]: el } })),
+    set((s) => {
+      if (Object.is(s.galleryCardRefs[index], el)) return s
+      return { galleryCardRefs: { ...s.galleryCardRefs, [index]: el } }
+    }),
 
   markGalleryCardRound: (index, round) =>
     set((s) => ({ galleryCardRound: { ...s.galleryCardRound, [index]: round } })),
@@ -476,12 +489,14 @@ export const useUiStore = create<UiStore>()((set, get) => ({
 
   setRenameDraft: (renameDraft) => set({ renameDraft }),
   setModifierPickerOpen: (modifierPickerOpen) => set({ modifierPickerOpen }),
+  /** Unchanged value is a no-op: this is called during render. */
   markParamDrift: (key, value) =>
-    set((s) => ({ paramDrifts: { ...s.paramDrifts, [key]: value } })),
+    set((s) => (Object.is(s.paramDrifts[key], value) ? s : { paramDrifts: { ...s.paramDrifts, [key]: value } })),
 
   setParamDraft: (key, draft) => set((s) => ({ paramDrafts: { ...s.paramDrafts, [key]: draft } })),
   clearParamDraft: (key) =>
     set((s) => {
+      if (!(key in s.paramDrafts)) return s
       const next = { ...s.paramDrafts }
       delete next[key]
       return { paramDrafts: next }
@@ -500,10 +515,57 @@ export const useUiStore = create<UiStore>()((set, get) => ({
    * selector — a component reads them with `getState()` inside a handler or an
    * effect, which is why storing them costs no re-renders.
    */
-  setRefs: (refs) => set(refs),
-  setRasterMeta: (rasterMeta) => set({ rasterMeta }),
-  setRefineTimer: (refineTimer) => set({ refineTimer }),
-  setStageDrag: (stageDrag) => set({ stageDrag }),
+  /**
+   * Attach or clear DOM handles.
+   *
+   * The equality check is load-bearing. React re-invokes a ref callback whenever
+   * its identity changes — calling the old one with `null` and the new one with
+   * the element — so an inline callback that writes unconditionally notifies on
+   * every render and loops until React bails with "Maximum update depth
+   * exceeded". Callers also memoise their callbacks; this is the backstop that
+   * makes such a mistake harmless.
+   */
+  setRefs: (refs) => {
+    const s = get()
+    let changed = false
+    const next: Partial<Pick<UiStore, 'stageRef' | 'canvasRef' | 'rasterCanvas'>> = {}
+    for (const k of ['stageRef', 'canvasRef', 'rasterCanvas'] as const) {
+      if (!(k in refs)) continue
+      const v = refs[k] as never
+      if (!Object.is(s[k], v)) {
+        next[k] = v
+        changed = true
+      }
+    }
+    if (changed) set(next)
+  },
+
+  /**
+   * Field-wise equality: the draw effect builds a fresh object each time, so
+   * comparing by reference would report every call as a change and notify on
+   * every frame of a pan.
+   */
+  setRasterMeta: (rasterMeta) => {
+    const cur = get().rasterMeta
+    if (cur === rasterMeta) return
+    if (
+      cur !== null &&
+      rasterMeta !== null &&
+      cur.key === rasterMeta.key &&
+      cur.unit === rasterMeta.unit &&
+      Object.is(cur.ir, rasterMeta.ir)
+    ) {
+      return
+    }
+    set({ rasterMeta })
+  },
+
+  setRefineTimer: (refineTimer) => {
+    if (Object.is(get().refineTimer, refineTimer)) return
+    set({ refineTimer })
+  },
+  /** Runs on every pointermove, so an unchanged drag must not notify. */
+  setStageDrag: (stageDrag) => set((s) => (Object.is(s.stageDrag, stageDrag) ? s : { stageDrag })),
   patchSpaceHeld: (spaceHeld) => set({ spaceHeld }),
   bumpRefine: () => set((s) => ({ refineTick: s.refineTick + 1 })),
 }))

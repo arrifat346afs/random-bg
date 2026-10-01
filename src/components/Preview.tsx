@@ -45,6 +45,23 @@ export function Preview() {
    */
   const stageEl = () => useUiStore.getState().stageRef
   const canvasEl = () => useUiStore.getState().canvasRef
+
+  /**
+   * Stable ref callbacks.
+   *
+   * These must NOT be inline arrows. React re-invokes a ref callback whenever
+   * its identity changes — old one with `null`, new one with the element — so an
+   * inline callback writes on every render, and a write that notifies sends React
+   * straight back for another one. That is an infinite render loop, which React
+   * eventually reports as "Maximum update depth exceeded". `useCallback` with an
+   * empty dep list gives them a fixed identity for the component's lifetime.
+   */
+  const attachStage = useCallback((el: HTMLDivElement | null) => {
+    useUiStore.getState().setRefs({ stageRef: el })
+  }, [])
+  const attachCanvas = useCallback((el: HTMLCanvasElement | null) => {
+    useUiStore.getState().setRefs({ canvasRef: el })
+  }, [])
   // Stage size comes from the ResizeObserver; the stage element handle itself is
   // in the store but read via getState() so nothing subscribes to a DOM node.
   const size = useUiStore((s) => s.stageSize)
@@ -394,7 +411,7 @@ export function Preview() {
   return (
     <div className="relative flex min-h-0 flex-1 flex-col bg-stage">
       <div
-        ref={(el) => ui().setRefs({ stageRef: el })}
+        ref={attachStage}
         onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -405,7 +422,7 @@ export function Preview() {
         }`}
         style={{ touchAction: 'none' }}
       >
-        <canvas ref={(el) => ui().setRefs({ canvasRef: el })} className="absolute inset-0 h-full w-full" />
+        <canvas ref={attachCanvas} className="absolute inset-0 h-full w-full" />
 
         {/* Selection box. Drawn in the same transform as the raster blit, so it
             tracks zoom and pan exactly. Geometry extent only — a glow's visible

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useCallback, useEffect } from 'react'
 import { useUiStore } from '@/store/uiStore'
 import { generateProject } from '@/lib/pipeline'
 import { compositeLayers } from '@/lib/export'
@@ -100,7 +100,15 @@ function GalleryCard({
   // store, and an inline `{current}` object would be a new ref every render, so
   // React would detach and reattach it (and the effect below would see a
   // different object each time).
-  const attach = (el: HTMLCanvasElement | null) => ui().setGalleryCardRef(index, el)
+  /**
+   * Stable per-card ref callback — see the note in Preview. An inline arrow here
+   * re-runs on every render and, combined with a notifying store write, loops.
+   * `index` is the only dependency and it is fixed per card.
+   */
+  const attach = useCallback(
+    (el: HTMLCanvasElement | null) => ui().setGalleryCardRef(index, el),
+    [index],
+  )
 
   // Flip back to "loading" while rendering whenever the card's project changes.
   // The round counter identifies the project, so it doubles as the memory.

@@ -376,3 +376,157 @@ describe('uiStore refs', () => {
     expect(selectors.length).toBeGreaterThan(0)
   })
 })
+
+/* ---- DOM handle attachment ------------------------------------------------ */
+
+/**
+ * Regression: an inline `ref={(el) => store.setRefs({ stageRef: el })}` made the
+ * app render forever. React re-invokes a ref callback whenever its identity
+ * changes (old one with `null`, new one with the element), so each render wrote
+ * twice; because the write always produced a new state object, every write
+ * notified, which sent React back for another render. React surfaced it as
+ * "Maximum update depth exceeded".
+ *
+ * Two things prevent a recurrence: callers memoise their callbacks, and the
+ * setters ignore a value that is already current.
+ */
+describe('DOM handle attachment', () => {
+  test('re-attaching the same element notifies nobody', () => {
+    const el = {} as HTMLCanvasElement
+    useUiStore.getState().setRefs({ canvasRef: el })
+
+    let hits = 0
+    const un = useUiStore.subscribe(() => hits++)
+    // exactly what React does to a changed ref callback, twice per render
+    useUiStore.getState().setRefs({ canvasRef: el })
+    useUiStore.getState().setRefs({ canvasRef: el })
+    un()
+    expect(hits).toBe(0)
+  })
+
+  test('detaching and re-attaching notifies exactly twice, not forever', () => {
+    const el = {} as HTMLDivElement
+    useUiStore.getState().setRefs({ stageRef: el })
+    let hits = 0
+    const un = useUiStore.subscribe(() => hits++)
+    useUiStore.getState().setRefs({ stageRef: null })
+    useUiStore.getState().setRefs({ stageRef: el })
+    un()
+    expect(hits).toBe(2)
+  })
+
+  test('a partial update leaves the other handle alone', () => {
+    const a = {} as HTMLDivElement
+    const b = {} as HTMLCanvasElement
+    const u = useUiStore.getState()
+    u.setRefs({ stageRef: a, canvasRef: b })
+    const after = useUiStore.getState()
+    u.setRefs({ stageRef: a })
+    expect(after.stageRef).toBe(a)
+    expect(after.canvasRef).toBe(b)
+  })
+
+  test('the raster cache metadata and timer ignore no-op writes', () => {
+    useUiStore.getState().setRasterMeta({ key: 'k', unit: 1, ir: null })
+    let hits = 0
+    const un = useUiStore.subscribe(() => hits++)
+    useUiStore.getState().setRasterMeta({ key: 'k', unit: 1, ir: null })
+    useUiStore.getState().setRefineTimer(null)
+    un()
+    expect(hits).toBe(0)
+  })
+
+  test('gallery card refs ignore a no-op write', () => {
+    const el = {} as HTMLCanvasElement
+    useUiStore.getState().setGalleryCardRef(0, el)
+    let hits = 0
+    const un = useUiStore.subscribe(() => hits++)
+    useUiStore.getState().setGalleryCardRef(0, el)
+    un()
+    expect(hits).toBe(0)
+  })
+})
+
+/**
+ * The other half of the fix is at the call site, so assert that too: no inline
+ * ref callback may write to the store. If someone reintroduces one, React loops
+ * and the app becomes unusable — worth failing a test over.
+ */
+describe('ref callbacks are memoised', () => {
+  const files = ['../components/Preview.tsx', '../components/GalleryDialog.tsx']
+
+  test('no store-writing ref callback is declared inline', () => {
+    for (const rel of files) {
+      const src = readFileSync(new URL(rel, import.meta.url), 'utf8')
+      // `ref={(...)}` — an arrow or any inline expression — rather than `ref={name}`
+      const inlineRefs = src.match(/ref=\{\([^)]*\)\s*=>/g) ?? []
+      for (const r of inlineRefs) {
+        // inline refs are fine so long as they do not touch the store
+        expect(r).not.toMatch(/ui\(\)|useUiStore|getState\(\)/)
+      }
+      expect(src).toMatch(/ref=\{attach/)
+    }
+  })
+})
+
+/**
+ * The three stores setters that are called *during render* must be idempotent,
+ * or a render-phase write turns into a re-render that triggers another write.
+ */
+describe('render-phase setters are idempotent', () => {
+  test('resetExportTransient ignores a repeat epoch', () => {
+    useUiStore.getState().resetExportTransient('true:png')
+    let hits = 0
+    const un = useUiStore.subscribe(() => hits++)
+    useUiStore.getState().resetExportTransient('true:png')
+    un()
+    expect(hits).toBe(0)
+  })
+
+  test('resetExportTransient still clears a stale result on a new epoch', () => {
+    useUiStore.getState().resetExportTransient('true:png')
+    useUiStore.getState().patchExport({ exportStatus: { kind: 'ok', msg: 'x' }, exportProgress: 40 })
+    useUiStore.getState().resetExportTransient('true:svg')
+    expect(useUiStore.getState().exportStatus).toBeNull()
+    expect(useUiStore.getState().exportProgress).toBe(0)
+    expect(useUiStore.getState().exportEpoch).toBe('true:svg')
+  })
+
+  test('markParamDrift ignores an unchanged value', () => {
+    useUiStore.getState().markParamDrift('L1:density', 5)
+    let hits = 0
+    const un = useUiStore.subscribe(() => hits++)
+    useUiStore.getState().markParamDrift('L1:density', 5)
+    un()
+    expect(hits).toBe(0)
+  })
+
+  test('clearParamDraft ignores a missing key', () => {
+    useUiStore.getState().setParamDraft('L1:density', '3')
+    let hits = 0
+    const un = useUiStore.subscribe(() => hits++)
+    useUiStore.getState().clearParamDraft('not-there')
+    un()
+    expect(hits).toBe(0)
+  })
+
+  test('setStageDrag ignores an identical drag', () => {
+    const drag = {
+      id: 1,
+      mode: 'pan' as const,
+      x: 1,
+      y: 2,
+      px: 3,
+      py: 4,
+      ox: 0,
+      oy: 0,
+      moved: false,
+    }
+    useUiStore.getState().setStageDrag(drag)
+    let hits = 0
+    const un = useUiStore.subscribe(() => hits++)
+    useUiStore.getState().setStageDrag(drag)
+    un()
+    expect(hits).toBe(0)
+  })
+})
