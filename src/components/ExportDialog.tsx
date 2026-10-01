@@ -7,7 +7,6 @@ import {
   exportAnimation,
   exportProject,
   projectToSvg,
-  supportsWebM,
   type ExportFormat,
 } from '@/lib/export'
 import {
@@ -21,36 +20,21 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
-import { Switch } from '@/components/ui/switch'
 import { Separator } from '@/components/ui/separator'
 import { Progress } from '@/components/ui/progress'
-import {
-  Download,
-  Copy,
-  ImageIcon,
-  FileCode2,
-  Film,
-  FileJson,
-  Check,
-  AlertTriangle,
-} from 'lucide-react'
+import { Download, Copy, Check, AlertTriangle } from 'lucide-react'
 import { useProjectStore } from '@/store/projectStore'
 import { useRenderStore } from '@/store/renderStore'
 import { useUiStore } from '@/store/uiStore'
+import { FallbackBox } from './export/FallbackBox'
+import { FormatPicker } from './export/FormatPicker'
+import { Row } from './export/Row'
+import { fmtBytes } from './export/format'
 
 interface Props {
   open: boolean
   onOpenChange: (v: boolean) => void
 }
-
-const FORMATS: { value: ExportFormat; label: string; icon: React.ReactNode; hint: string }[] = [
-  { value: 'png', label: 'PNG', icon: <ImageIcon className="h-3.5 w-3.5" />, hint: 'lossless, keeps alpha' },
-  { value: 'jpg', label: 'JPG', icon: <ImageIcon className="h-3.5 w-3.5" />, hint: 'smaller, no alpha' },
-  { value: 'webp', label: 'WebP', icon: <ImageIcon className="h-3.5 w-3.5" />, hint: 'modern, alpha' },
-  { value: 'svg', label: 'SVG', icon: <FileCode2 className="h-3.5 w-3.5" />, hint: 'true vector' },
-  { value: 'json', label: 'JSON', icon: <FileJson className="h-3.5 w-3.5" />, hint: 'project file' },
-  { value: 'webm', label: 'WebM', icon: <Film className="h-3.5 w-3.5" />, hint: '4s looping motion' },
-]
 
 export function ExportDialog({ open, onOpenChange }: Props) {
   // Only the canvas dimensions are *rendered*. Everything else needs the whole
@@ -245,29 +229,7 @@ export function ExportDialog({ open, onOpenChange }: Props) {
         </DialogHeader>
 
         <div className="space-y-3">
-          {/* format */}
-          <div>
-            <Label className="mb-1.5 block">Format</Label>
-            <div className="grid grid-cols-3 gap-1.5">
-              {FORMATS.map((f) => (
-                <button
-                  key={f.value}
-                  onClick={() => setFormat(f.value)}
-                  disabled={f.value === 'webm' && !supportsWebM()}
-                  className={`flex flex-col items-start gap-0.5 rounded-md border p-2 text-left transition-colors disabled:opacity-40 ${
-                    format === f.value
-                      ? 'border-primary bg-primary/10'
-                      : 'hover:bg-accent'
-                  }`}
-                >
-                  <span className="flex items-center gap-1 text-xs font-semibold">
-                    {f.icon} {f.label}
-                  </span>
-                  <span className="text-[9px] leading-tight text-muted-foreground">{f.hint}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+          <FormatPicker value={format} onChange={setFormat} />
 
           {/* scale */}
           {format !== 'json' && (
@@ -412,80 +374,3 @@ export function ExportDialog({ open, onOpenChange }: Props) {
   )
 }
 
-function Row({
-  id,
-  label,
-  hint,
-  checked,
-  onChange,
-}: {
-  id: string
-  label: string
-  hint: string
-  checked: boolean
-  onChange: (v: boolean) => void
-}) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <div className="min-w-0">
-        <Label htmlFor={id} className="cursor-pointer text-xs">
-          {label}
-        </Label>
-        <p className="text-[10px] leading-tight text-muted-foreground">{hint}</p>
-      </div>
-      <Switch id={id} checked={checked} onCheckedChange={onChange} />
-    </div>
-  )
-}
-
-function FallbackBox({
-  title,
-  body,
-  url,
-  copyLabel,
-  copy,
-}: {
-  title: string
-  body: string
-  url?: string
-  copyLabel?: string
-  copy?: () => Promise<boolean>
-}) {
-  const copied = useUiStore((s) => s.exportCopied)
-  const setCopied = (ok: boolean) => useUiStore.getState().patchExport({ exportCopied: ok })
-  return (
-    <div className="rounded-lg border border-dashed p-3 text-xs">
-      <p className="mb-1 flex items-center gap-1.5 font-semibold">
-        <Download className="h-3.5 w-3.5" /> {title}
-      </p>
-      <p className="mb-2 text-muted-foreground">{body}</p>
-      <div className="flex flex-wrap gap-1.5">
-        {url && (
-          <Button size="sm" variant="outline" asChild>
-            <a href={url} download="fx-forge-export">
-              Save link as…
-            </a>
-          </Button>
-        )}
-        {copy && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={async () => {
-              const ok = await copy()
-              setCopied(ok)
-            }}
-          >
-            {copied ? <Check /> : <Copy />} {copyLabel ?? 'Copy'}
-          </Button>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1048576).toFixed(2)} MB`
-}
