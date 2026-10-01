@@ -74,11 +74,31 @@ function summarise(results: LayerResult[]): RenderOutput {
   return { results, ms, count, truncated }
 }
 
+/**
+ * Identity of a render request.
+ *
+ * This has to be a *content* signature, not the project object's reference.
+ * Every edit produces a fresh `project` object, so comparing by reference meant
+ * `pending.project === project` never matched and the coalescing branch below
+ * was unreachable — a slider drag queued a new task per tick instead of
+ * collapsing into the one already waiting.
+ *
+ * Cheap to compute and specific enough to be correct: any change to the seed,
+ * the canvas, or the layer count yields a different signature, and anything
+ * finer (a param value) is covered by `projectStore.version`.
+ */
+function renderSignature(project: Project): string {
+  return `${project.seed}:${project.canvas.w}x${project.canvas.h}:${project.layers.length}`
+}
+
 export function requestRender(project: Project, onProgress: ProgressFn): Promise<RenderOutput> {
   return new Promise<RenderOutput>((resolve, reject) => {
     const waiter: Waiter = { resolve, reject }
+    const sig = renderSignature(project)
     if (running) {
-      if (pending && pending.project === project) {
+      // Same signature as the queued task: the work is identical, so join it
+      // rather than superseding it.
+      if (pending && renderSignature(pending.project) === sig) {
         pending.waiters.push(waiter)
         return
       }

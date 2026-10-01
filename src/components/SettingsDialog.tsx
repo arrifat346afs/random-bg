@@ -25,7 +25,14 @@ interface Props {
 }
 
 export function SettingsDialog({ open, onOpenChange }: Props) {
-  const project = useProjectStore((s) => s.project)
+  // Narrow to the four things actually rendered here. Selecting the whole
+  // project re-rendered this dialog on every param edit elsewhere.
+  const canvas = useProjectStore((s) => s.project.canvas)
+  const name = useProjectStore((s) => s.project.name)
+  const seed = useProjectStore((s) => s.project.seed)
+  const layerCount = useProjectStore((s) => s.project.layers.length)
+  const groupCount = useProjectStore((s) => s.project.groups.length)
+  const paletteSize = useProjectStore((s) => s.project.palette.colors.length)
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -56,7 +63,7 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
                         useProjectStore.getState().patchProject((p) => ({ ...p, canvas: { ...p.canvas, w: s.w, h: s.h } }))
                       }
                       className={`rounded-md border px-1.5 py-1.5 text-[10px] leading-tight transition-colors ${
-                        project.canvas.w === s.w && project.canvas.h === s.h
+                        canvas.w === s.w && canvas.h === s.h
                           ? 'border-primary bg-primary/10'
                           : 'hover:bg-accent'
                       }`}
@@ -73,14 +80,14 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
               <div className="grid grid-cols-2 gap-3">
                 <NumField
                   label="Width"
-                  value={project.canvas.w}
+                  value={canvas.w}
                   min={16}
                   max={8192}
                   onChange={(w) => useProjectStore.getState().patchProject((p) => ({ ...p, canvas: { ...p.canvas, w } }))}
                 />
                 <NumField
                   label="Height"
-                  value={project.canvas.h}
+                  value={canvas.h}
                   min={16}
                   max={8192}
                   onChange={(h) => useProjectStore.getState().patchProject((p) => ({ ...p, canvas: { ...p.canvas, h } }))}
@@ -93,7 +100,7 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
                 </Label>
                 <Input
                   id="pname"
-                  value={project.name}
+                  value={name}
                   onChange={(e) =>
                     useProjectStore.getState().patchProject((p) => ({ ...p, name: e.target.value }), {
                       coalesce: 'name',
@@ -104,18 +111,18 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
 
               <Separator />
               <div className="flex flex-wrap gap-1">
-                <Badge variant="muted">seed {project.seed}</Badge>
-                <Badge variant="muted">{project.layers.length} layers</Badge>
-                <Badge variant="muted">{project.groups.length} groups</Badge>
-                <Badge variant="muted">{project.palette.colors.length} colours</Badge>
+                <Badge variant="muted">seed {seed}</Badge>
+                <Badge variant="muted">{layerCount} layers</Badge>
+                <Badge variant="muted">{groupCount} groups</Badge>
+                <Badge variant="muted">{paletteSize} colours</Badge>
               </div>
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() => {
                   const next = createProject({
-                    seed: project.seed,
-                    canvas: { w: project.canvas.w, h: project.canvas.h },
+                    seed: seed,
+                    canvas: { w: canvas.w, h: canvas.h },
                     layers: [],
                     name: 'Untitled effect',
                   })

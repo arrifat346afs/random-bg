@@ -50,7 +50,12 @@ interface Props {
 }
 
 export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
-  const project = useProjectStore((s) => s.project)
+  // Narrow: the whole-project selector re-rendered TopBar on every slider tick
+  // because a param edit produces a new project object. Only these two fields
+  // are rendered here.
+  const seed = useProjectStore((s) => s.project.seed)
+  const canvasW = useProjectStore((s) => s.project.canvas.w)
+  const canvasH = useProjectStore((s) => s.project.canvas.h)
   const generating = useRenderStore((s) => s.generating)
   const theme = useUiStore((s) => s.view.theme)
   const lockAspect = useUiStore((s) => s.view.lockAspect)
@@ -69,8 +74,8 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
   // `seedDraft === ''` check is the "not yet initialised" sentinel: once the
   // user types, an unrelated seed change must not clobber their text unless the
   // field has focus, which the input handles on its own.
-  if (seedDraft === '' && project.seed !== undefined) {
-    ui().setSeedDraft(formatSeed(project.seed))
+  if (seedDraft === '' && seed !== undefined) {
+    ui().setSeedDraft(formatSeed(seed))
   }
 
   const applySeed = (raw: string) => {
@@ -78,7 +83,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
     useProjectStore.getState().patchProject((p) => ({ ...p, seed: s }))
   }
 
-  const stepSeed = (delta: number) => applySeed(String(((project.seed + delta) >>> 0) || 1))
+  const stepSeed = (delta: number) => applySeed(String(((seed + delta) >>> 0) || 1))
 
   const doRandomize = async () => {
     ui().setRolling(true)
@@ -150,7 +155,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
             onBlur={(e) => applySeed(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') applySeed(seedDraft)
-              if (e.key === 'Escape') ui().setSeedDraft(formatSeed(project.seed))
+              if (e.key === 'Escape') ui().setSeedDraft(formatSeed(seed))
             }}
             className="h-full w-[112px] bg-transparent text-center font-mono text-[11px] tabular-nums outline-none"
           />
@@ -179,7 +184,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
             aria-label="Copy seed"
             onClick={() => {
               ui().setShowSeed(true)
-              void navigator.clipboard?.writeText(String(project.seed)).catch(() => {})
+              void navigator.clipboard?.writeText(String(seed)).catch(() => {})
             }}
           >
             <Copy />
@@ -202,7 +207,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
             >
               <Ratio className="h-3.5 w-3.5 shrink-0 opacity-70" />
               <span className="hidden text-[11px] md:inline">
-                {project.canvas.w}×{project.canvas.h}
+                {canvasW}×{canvasH}
               </span>
             </Button>
           </DropdownMenuTrigger>
@@ -233,7 +238,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
             <DropdownMenuSeparator />
             <DropdownMenuLabel>Presets</DropdownMenuLabel>
             {SIZE_PRESETS.map((s) => {
-              const active = project.canvas.w === s.w && project.canvas.h === s.h
+              const active = canvasW === s.w && canvasH === s.h
               return (
                 <DropdownMenuItem
                   key={s.label}
@@ -364,7 +369,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
         )}
       </div>
 
-      <SeedDialog open={showSeed} onClose={() => ui().setShowSeed(false)} seed={project.seed} />
+      <SeedDialog open={showSeed} onClose={() => ui().setShowSeed(false)} seed={seed} />
     </header>
   )
 }

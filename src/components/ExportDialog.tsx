@@ -53,7 +53,12 @@ const FORMATS: { value: ExportFormat; label: string; icon: React.ReactNode; hint
 ]
 
 export function ExportDialog({ open, onOpenChange }: Props) {
-  const project = useProjectStore((s) => s.project)
+  // Only the canvas dimensions are *rendered*. Everything else needs the whole
+  // project, but only inside event handlers, so those read it through
+  // getState() rather than subscribing — otherwise a param edit elsewhere
+  // re-renders this dialog on every tick.
+  const canvas = useProjectStore((s) => s.project.canvas)
+  const project = () => useProjectStore.getState().project
   const results = useRenderStore((s) => s.results)
   const format = useUiStore((s) => s.exportFormat)
   const scale = useUiStore((s) => s.exportScale)
@@ -92,12 +97,12 @@ export function ExportDialog({ open, onOpenChange }: Props) {
   if (epoch !== resetKey) useUiStore.getState().resetExportTransient(resetKey)
 
   // --- dimension guard ---------------------------------------------------
-  const px = project.canvas.w * project.canvas.h * scale * scale
+  const px = canvas.w * canvas.h * scale * scale
   const pxCapped = px > MAX_EXPORT_PIXELS
-  const dimCapped = project.canvas.w * scale > MAX_EXPORT_DIM || project.canvas.h * scale > MAX_EXPORT_DIM
+  const dimCapped = canvas.w * scale > MAX_EXPORT_DIM || canvas.h * scale > MAX_EXPORT_DIM
   const effScale = pxCapped || dimCapped ? 1 : scale
-  const outputW = Math.round(project.canvas.w * effScale)
-  const outputH = Math.round(project.canvas.h * effScale)
+  const outputW = Math.round(canvas.w * effScale)
+  const outputH = Math.round(canvas.h * effScale)
 
   const run = async () => {
     if (!results) return
@@ -107,7 +112,7 @@ export function ExportDialog({ open, onOpenChange }: Props) {
     setProgress(0)
     try {
       if (format === 'webm') {
-        const res = await exportAnimation(project, results, {
+        const res = await exportAnimation(project(), results, {
           seconds,
           fps: 30,
           scale: effScale,
@@ -125,7 +130,7 @@ export function ExportDialog({ open, onOpenChange }: Props) {
         return
       }
 
-      const res = await exportProject(project, results, {
+      const res = await exportProject(project(), results, {
         format,
         scale: effScale,
         quality,
@@ -197,20 +202,20 @@ export function ExportDialog({ open, onOpenChange }: Props) {
   const copySource = async () => {
     if (!results) return
     if (format === 'svg') {
-      const { svg } = projectToSvg(project, results, { flattenAdditive: flatten })
+      const { svg } = projectToSvg(project(), results, { flattenAdditive: flatten })
       const ok = await copyText(svg)
       setStatus({ kind: ok ? 'ok' : 'warn', msg: ok ? 'SVG copied to clipboard' : 'Copy blocked' })
       return
     }
     if (format === 'json') {
-      const ok = await copyText(JSON.stringify(project, null, 2))
+      const ok = await copyText(JSON.stringify(project(), null, 2))
       setStatus({ kind: ok ? 'ok' : 'warn', msg: ok ? 'JSON copied to clipboard' : 'Copy blocked' })
       return
     }
     // raster → copy the image bitmap
     setBusy(true)
     try {
-      const res = await exportProject(project, results, {
+      const res = await exportProject(project(), results, {
         format,
         scale: effScale,
         quality,

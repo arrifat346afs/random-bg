@@ -28,7 +28,10 @@ export function ProjectStrip({
   onToggleLeft,
   onToggleRight,
 }: Props) {
-  const project = useProjectStore((s) => s.project)
+  // Narrow: a param edit replaces the project object, so selecting it wholesale
+  // re-rendered this status bar on every slider tick for fields that never change.
+  const name = useProjectStore((s) => s.project.name)
+  const canvas = useProjectStore((s) => s.project.canvas)
   const generating = useRenderStore((s) => s.generating)
   const storageOk = useUiStore((s) => s.storageAvailable)
 
@@ -47,7 +50,7 @@ export function ProjectStrip({
         title="Project settings (,)"
       >
         <Settings2 className="h-3.5 w-3.5 shrink-0" />
-        <span className="hidden max-w-32 truncate sm:inline">{project.name}</span>
+        <span className="hidden max-w-32 truncate sm:inline">{name}</span>
       </button>
       <Separator orientation="vertical" className="hidden h-4 sm:block" />
       <button
@@ -55,10 +58,10 @@ export function ProjectStrip({
         className="shrink-0 rounded tabular-nums hover:text-foreground"
         title="Canvas size (,)"
       >
-        {project.canvas.w}×{project.canvas.h}
+        {canvas.w}×{canvas.h}
       </button>
       <Separator orientation="vertical" className="hidden h-4 sm:block" />
-      <span className="hidden shrink-0 sm:inline">bg: {project.canvas.bg.kind}</span>
+      <span className="hidden shrink-0 sm:inline">bg: {canvas.bg.kind}</span>
       <div className="min-w-0 flex-1" />
       {!storageOk && (
         <Badge variant="warning" className="shrink-0 text-[9px]">

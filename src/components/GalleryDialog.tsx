@@ -26,7 +26,10 @@ interface Props {
  * live thumbnails. Picking one re-parents the project; Ctrl+Z restores it.
  */
 export function GalleryDialog({ open, onOpenChange }: Props) {
-  const project = useProjectStore((s) => s.project)
+  // Narrow: only the two fields in the header are rendered here. The cards
+  // receive their own project from the gallery items, not from this selector.
+  const name = useProjectStore((s) => s.project.name)
+  const seed = useProjectStore((s) => s.project.seed)
   const items = useUiStore((s) => s.gallery)
   const round = useUiStore((s) => s.galleryRound)
   const ui = () => useUiStore.getState()
@@ -48,14 +51,14 @@ export function GalleryDialog({ open, onOpenChange }: Props) {
             <Sparkles className="h-4 w-4 text-primary" /> Evolve
           </DialogTitle>
           <DialogDescription>
-            Nine mutations of <span className="font-medium text-foreground">{project.name}</span>.
+            Nine mutations of <span className="font-medium text-foreground">{name}</span>.
             The first four are gentle, the rest push further. Pick one to re-parent the project —
             Ctrl+Z brings the old one back.
           </DialogDescription>
         </DialogHeader>
 
         <div className="flex items-center justify-between border-b px-4 py-2">
-          <Badge variant="muted">seed {project.seed}</Badge>
+          <Badge variant="muted">seed {seed}</Badge>
           <Button size="sm" variant="outline" onClick={regenerate}>
             <RefreshCw /> Re-roll nine
           </Button>

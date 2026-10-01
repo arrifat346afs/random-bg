@@ -263,3 +263,38 @@ describe('applyProject', () => {
     expect(useUiStore.getState().gallery).toBeNull()
   })
 })
+/* ---- drag responsiveness ------------------------------------------------- */
+
+/**
+ * Regression cover for the two store-level causes of slider-drag jank. The
+ * component side (narrow selectors) is measured by `scripts/freeze-probe.ts`.
+ */
+describe('updateLayer', () => {
+  test('an edit that resolves to no change commits nothing', () => {
+    // Dragging a slider across its current value should wake nobody.
+    const before = p().project
+    const v = p().version
+    p().updateLayer(before.layers[0].id, (l) => l)
+    expect(p().project).toBe(before)
+    expect(p().version).toBe(v)
+  })
+
+  test('only the edited layer changes identity', () => {
+    const id = p().selectedLayerId as string
+    const others = p().project.layers.filter((l) => l.id !== id)
+    p().updateLayer(id, (l) => ({ ...l, opacity: 0.5 }))
+    const after = p().project.layers.filter((l) => l.id !== id)
+    // untouched layers keep their identity, so a subscriber selecting one of
+    // them (or a shallow-compared projection) does not re-render
+    expect(after.map((l) => l.id)).toEqual(others.map((l) => l.id))
+    expect(after[0]).toBe(others[0])
+  })
+
+  test('a param edit leaves the displayed fields alone', () => {
+    const id = p().selectedLayerId as string
+    const name = p().project.layers[0].name
+    p().updateLayer(id, (l) => ({ ...l, params: { ...l.params, sizeMin: 0.9 } }))
+    expect(p().project.layers[0].name).toBe(name)
+    expect(p().project.layers[0].gen).toBe(useProjectStore.getState().project.layers[0].gen)
+  })
+})

@@ -12,18 +12,14 @@ import {
 import {
   SortableContext,
   sortableKeyboardCoordinates,
-  useSortable,
   verticalListSortingStrategy,
   arrayMove,
 } from '@dnd-kit/sortable'
-import { CSS } from '@dnd-kit/utilities'
-import { getGenerator, generatorsByFamily } from '@/lib/generators'
-import type { Layer, LayerGroup } from '@/lib/schema'
 import { createLayer, createGroup, duplicateLayer, moveLayer } from '@/lib/project'
+import { generatorsByFamily } from '@/lib/generators'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,56 +30,26 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import {
-  Plus,
   Copy,
-  Trash2,
-  GripVertical,
-  Eye,
-  EyeOff,
-  Lock,
-  LockOpen,
-  ChevronDown,
-  ChevronRight,
-  Layers,
-  Ungroup,
+  Plus,
   Group as GroupIcon,
+  Layers,
+  Trash2,
+  Ungroup,
 } from 'lucide-react'
 import { useProjectStore } from '@/store/projectStore'
-
-/* ---- block model ----------------------------------------------------------
- * A "block" is either a single ungrouped layer or a contiguous run of layers
- * sharing a group id. Drag-and-drop reorders blocks, which guarantees group
- * members always stay contiguous — no special cases in the drop handler.
- * ------------------------------------------------------------------------ */
-
-interface Block {
-  key: string
-  groupId: string | null
-  layers: Layer[]
-  group?: LayerGroup
-}
-
-function toBlocks(layers: Layer[], groups: LayerGroup[]): Block[] {
-  const out: Block[] = []
-  for (const l of layers) {
-    const last = out[out.length - 1]
-    if (last && last.groupId === l.groupId) {
-      last.layers.push(l)
-    } else {
-      out.push({
-        key: l.id,
-        groupId: l.groupId ?? null,
-        layers: [l],
-        group: l.groupId ? groups.find((g) => g.id === l.groupId) : undefined,
-      })
-    }
-  }
-  return out
-}
+import { BlockView } from './layer-panel/BlockView'
+import { EmptyLayers } from './layer-panel/EmptyLayers'
+import { Tip } from './layer-panel/Tip'
+import { useLayerGroups, useLayerSummaries } from './layer-panel/hooks'
+import { toBlocks } from './layer-panel/model'
 
 export function LayerPanel() {
-  const layers = useProjectStore((s) => s.project.layers)
-  const groups = useProjectStore((s) => s.project.groups)
+  // Projected + shallow-compared (see layer-panel/model.ts): a param edit
+  // replaces the layer object, so selecting `s.project.layers` re-rendered the
+  // whole panel on every slider tick even though no displayed field changed.
+  const layers = useLayerSummaries()
+  const groups = useLayerGroups()
   const selectedId = useProjectStore((s) => s.selectedLayerId)
   /** shift/cmd-clicked layers awaiting a group action */
   const multi = useUiStore((s) => s.multiSelect)
@@ -102,8 +68,16 @@ export function LayerPanel() {
     const to = blocks.findIndex((b) => b.key === over.id)
     if (from < 0 || to < 0) return
     const nextBlocks = arrayMove(blocks, from, to)
-    const flat = nextBlocks.flatMap((b) => b.layers)
-    useProjectStore.getState().commit({ ...useProjectStore.getState().project, layers: flat })
+    // blocks hold summaries, so map the new order back onto the real layers
+    const order = nextBlocks.flatMap((b) => b.layers.map((l) => l.id))
+    const store = useProjectStore.getState()
+    const byId = new Map(store.project.layers.map((l) => [l.id, l]))
+    const flat = order.flatMap((id) => {
+      const layer = byId.get(id)
+      return layer ? [layer] : []
+    })
+    if (flat.length !== store.project.layers.length) return
+    store.commit({ ...store.project, layers: flat })
   }
 
   /* ---- layer actions ---------------------------------------------------- */
@@ -349,277 +323,6 @@ export function LayerPanel() {
         </p>
       </footer>
     </div>
-  )
-}
-
-function Tip({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  )
-}
-
-function EmptyLayers({ onAdd }: { onAdd: (gen: string) => void }) {
-  return (
-    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-4 text-center">
-      <Layers className="h-6 w-6 text-muted-foreground" />
-      <p className="text-xs font-medium">No layers</p>
-      <p className="text-[10px] text-muted-foreground">
-        Start with a generator, then stack more on top.
-      </p>
-      <div className="flex flex-wrap justify-center gap-1">
-        {['particles', 'bokeh', 'smoke'].map((g) => (
-          <Button key={g} size="sm" variant="outline" onClick={() => onAdd(g)}>
-            {g}
-          </Button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function BlockView({
-  block,
-  selectedId,
-  multi,
-  onToggle,
-  onClick,
-  onMove,
-  onRemove,
-}: {
-  block: Block
-  selectedId: string | null
-  multi: string[]
-  onToggle: (id: string, key: 'visible' | 'solo' | 'locked') => void
-  onClick: (id: string, e: React.MouseEvent) => void
-  onMove: (id: string, dir: -1 | 1) => void
-  onRemove: (id: string) => void
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: block.key,
-  })
-  const collapsed = !!block.group?.collapsed
-  const isGroup = block.groupId != null
-
-  const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-  }
-
-  return (
-    <div ref={setNodeRef} style={style} className="relative">
-      {isGroup && (
-        <div className="mb-0.5 flex items-center gap-1 rounded-md border bg-muted/60 px-1 py-0.5">
-          <button
-            aria-label={collapsed ? 'Expand group' : 'Collapse group'}
-            onClick={() =>
-              block.group &&
-              useProjectStore.getState().patchProject((p) => ({
-                ...p,
-                groups: p.groups.map((g) =>
-                  g.id === block.group!.id ? { ...g, collapsed: !g.collapsed } : g,
-                ),
-              }))
-            }
-            className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground hover:text-foreground"
-          >
-            {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-            {block.group?.name ?? 'Group'}
-          </button>
-          <Badge variant="muted" className="ml-auto mr-1 h-4 px-1 text-[9px]">
-            {block.layers.length}
-          </Badge>
-        </div>
-      )}
-
-      {!collapsed && (
-        <div className="space-y-1">
-          {block.layers.map((layer, i) => (
-            <LayerRow
-              key={layer.id}
-              layer={layer}
-              selected={selectedId === layer.id}
-              multi={multi.includes(layer.id)}
-              first={i === 0}
-              last={i === block.layers.length - 1}
-              sortable={isGroup ? { attributes, listeners } : undefined}
-              handleStyle={style}
-              onClick={onClick}
-              onToggle={onToggle}
-              onMove={onMove}
-              onRemove={onRemove}
-              showHandle={i === 0 ? { attributes, listeners } : undefined}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* drag handle for the whole block, floating at the right of the header/first row */}
-      {isGroup && collapsed && (
-        <button
-          aria-label="Drag to reorder"
-          className="absolute right-1 top-1 cursor-grab text-muted-foreground hover:text-foreground active:cursor-grabbing"
-          {...attributes}
-          {...listeners}
-        >
-          <GripVertical className="h-3.5 w-3.5" />
-        </button>
-      )}
-    </div>
-  )
-}
-
-function LayerRow({
-  layer,
-  selected,
-  multi,
-  first,
-  last,
-  showHandle,
-  onClick,
-  onToggle,
-  onMove,
-  onRemove,
-}: {
-  layer: Layer
-  selected: boolean
-  multi: boolean
-  first: boolean
-  last: boolean
-  showHandle?: { attributes: unknown; listeners: unknown } | undefined
-  sortable?: { attributes: unknown; listeners: unknown } | undefined
-  handleStyle?: React.CSSProperties
-  onClick: (id: string, e: React.MouseEvent) => void
-  onToggle: (id: string, key: 'visible' | 'solo' | 'locked') => void
-  onMove: (id: string, dir: -1 | 1) => void
-  onRemove: (id: string) => void
-}) {
-  const gen = getGenerator(layer.gen)
-  const swatch = layer.color.palette.colors[0] ?? '#888888'
-
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      aria-pressed={selected}
-      onClick={(e) => onClick(layer.id, e)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onClick(layer.id, e as unknown as React.MouseEvent)
-        }
-      }}
-      className={`group flex cursor-pointer items-center gap-1.5 rounded-md border px-1.5 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-        selected
-          ? 'border-primary bg-primary/10'
-          : multi
-            ? 'border-primary/50 bg-primary/5'
-            : 'border-transparent hover:bg-accent'
-      } ${layer.visible ? '' : 'opacity-50'}`}
-    >
-      {showHandle ? (
-        <span
-          className="cursor-grab text-muted-foreground/60 hover:text-foreground active:cursor-grabbing"
-          {...(showHandle.attributes as Record<string, unknown>)}
-          {...(showHandle.listeners as Record<string, unknown>)}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <GripVertical className="h-3.5 w-3.5" />
-        </span>
-      ) : (
-        <span className="w-3.5 shrink-0" />
-      )}
-
-      <span
-        className="h-6 w-4 shrink-0 rounded-sm border"
-        style={{ backgroundColor: swatch }}
-        aria-hidden
-      />
-
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[11px] font-medium leading-tight">{layer.name}</span>
-        <span className="block truncate text-[9px] leading-tight text-muted-foreground">
-          {gen?.family ?? 'unknown'} · {Math.round(layer.opacity * 100)}% · {layer.blend}
-        </span>
-      </span>
-
-      <span className="flex shrink-0 items-center gap-px opacity-70 group-hover:opacity-100">
-        <RowBtn label="Move up" onClick={() => onMove(layer.id, -1)} disabled={first && !layer.groupId}>
-          <span className="text-[10px] leading-none">▲</span>
-        </RowBtn>
-        <RowBtn label="Move down" onClick={() => onMove(layer.id, 1)} disabled={last && !layer.groupId}>
-          <span className="text-[10px] leading-none">▼</span>
-        </RowBtn>
-        <RowBtn
-          label={layer.solo ? 'Unsolo' : 'Solo'}
-          active={layer.solo}
-          onClick={() => onToggle(layer.id, 'solo')}
-        >
-          <span className="text-[10px] font-bold leading-none">S</span>
-        </RowBtn>
-        <RowBtn
-          label={layer.visible ? 'Hide' : 'Show'}
-          onClick={() => onToggle(layer.id, 'visible')}
-        >
-          {layer.visible ? <Eye className="h-3 w-3" /> : <EyeOff className="h-3 w-3" />}
-        </RowBtn>
-        <RowBtn
-          label={layer.locked ? 'Unlock' : 'Lock'}
-          active={layer.locked}
-          onClick={() => onToggle(layer.id, 'locked')}
-        >
-          {layer.locked ? <Lock className="h-3 w-3" /> : <LockOpen className="h-3 w-3" />}
-        </RowBtn>
-        <RowBtn label="Delete" onClick={() => onRemove(layer.id)} danger>
-          <Trash2 className="h-3 w-3" />
-        </RowBtn>
-      </span>
-    </div>
-  )
-}
-
-function RowBtn({
-  label,
-  onClick,
-  active,
-  disabled,
-  danger,
-  children,
-}: {
-  label: string
-  onClick: () => void
-  active?: boolean
-  disabled?: boolean
-  danger?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          aria-label={label}
-          disabled={disabled}
-          onClick={(e) => {
-            e.stopPropagation()
-            onClick()
-          }}
-          className={`flex h-5 w-5 items-center justify-center rounded transition-colors disabled:opacity-30 ${
-            active
-              ? 'text-primary'
-              : danger
-                ? 'text-muted-foreground hover:bg-destructive/15 hover:text-destructive'
-                : 'text-muted-foreground hover:bg-background hover:text-foreground'
-          }`}
-        >
-          {children}
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="left">{label}</TooltipContent>
-    </Tooltip>
   )
 }
 

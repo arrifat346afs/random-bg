@@ -170,12 +170,27 @@ export const useProjectStore = create<ProjectStore>()((set, get) => ({
     set({ selectedLayerId: id })
   },
 
+  /**
+   * Update one layer immutably.
+   *
+   * Two things matter for drag responsiveness:
+   *
+   *  - If `fn` returns the same layer it was given (an edit that resolved to no
+   *    change), the whole commit is skipped. Dragging a slider across its
+   *    current value should not wake a single subscriber.
+   *  - Only the edited layer gets a new identity. The other layers keep theirs,
+   *    so a subscriber selecting one of them does not re-render — but the
+   *    `layers` *array* is necessarily new, since it holds the new layer.
+   */
   updateLayer: (id, fn, opts = {}) => {
     const project = get().project
     const idx = project.layers.findIndex((l) => l.id === id)
     if (idx < 0) return
+    const before = project.layers[idx]
+    const after = fn(before)
+    if (Object.is(after, before)) return
     const next = project.layers.slice()
-    next[idx] = fn(next[idx])
+    next[idx] = after
     get().commit({ ...project, layers: next }, opts)
   },
 
