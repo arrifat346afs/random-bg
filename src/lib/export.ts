@@ -7,11 +7,11 @@
  * can fall back to the "right-click to save" dialog.
  */
 
-import { buildIR, type IR, type Node } from './ir'
+import type { IR } from './ir'
+import { composeIR, type LayerResult } from './pipeline'
 import { renderCanvas, applyMotion, drawBackground } from './render/canvas'
 import { renderSVG, type SvgRenderOpts } from './render/svg'
 import type { BackgroundSpec, Project } from './schema'
-import type { LayerResult } from './pipeline'
 
 export type RasterFormat = 'png' | 'jpg' | 'webp'
 export type ExportFormat = 'svg' | RasterFormat | 'json' | 'webm'
@@ -47,17 +47,16 @@ export interface ExportResult {
   warnings: string[]
 }
 
-/** Compose layer IRs into a single IR (the preview and exporters share this). */
-export function compositeLayers(
-  results: LayerResult[],
-  w: number,
-  h: number,
-): IR {
-  const nodes: Node[] = []
-  for (const r of results) nodes.push(...r.ir.nodes)
-  return buildIR(w, h, nodes)
+/**
+ * Compose layer IRs into a single canvas IR.
+ *
+ * A thin alias over `composeIR` so exports, the quality gate and the gallery
+ * cannot drift from the preview — in particular so a moved layer is offset in
+ * the file you download, not just on screen.
+ */
+export function compositeLayers(project: Project, results: LayerResult[]): IR {
+  return composeIR(project, results)
 }
-
 function clampScale(w: number, h: number, scale: number): { scale: number; warnings: string[] } {
   const warnings: string[] = []
   let s = scale
@@ -83,7 +82,7 @@ export function projectToSvg(
   results: LayerResult[],
   opts: Partial<SvgRenderOpts> = {},
 ): { svg: string; ir: IR; warnings: string[] } {
-  const ir = compositeLayers(results, project.canvas.w, project.canvas.h)
+  const ir = compositeLayers(project, results)
   const svg = renderSVG(ir, {
     background: project.canvas.bg,
     flattenAdditive: opts.flattenAdditive,
@@ -137,7 +136,7 @@ export async function exportProject(
 
   // raster
   const { scale, warnings } = clampScale(project.canvas.w, project.canvas.h, opts.scale)
-  const ir = compositeLayers(results, project.canvas.w, project.canvas.h)
+  const ir = compositeLayers(project, results)
   const canvas = document.createElement('canvas')
   renderCanvas(ir, canvas, { scale, background: bg })
 
@@ -321,7 +320,7 @@ export async function exportAnimation(
   const fps = opts.fps ?? 30
   const total = Math.max(1, Math.round(seconds * fps))
   const { scale } = clampScale(project.canvas.w, project.canvas.h, opts.scale ?? 1)
-  const base = compositeLayers(results, project.canvas.w, project.canvas.h)
+  const base = compositeLayers(project, results)
 
   const canvas = document.createElement('canvas')
   canvas.width = Math.round(project.canvas.w * scale)

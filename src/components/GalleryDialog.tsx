@@ -110,7 +110,7 @@ function GalleryCard({
       try {
         const results = await generateProject(project)
         if (cancelled) return
-        const ir = compositeLayers(results, project.canvas.w, project.canvas.h)
+        const ir = compositeLayers(project, results)
         const canvas = canvasRef.current
         if (!canvas) return
         // renderCanvas sizes the bitmap itself: target ~360px on the long edge

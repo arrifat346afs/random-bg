@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { buildIR, type IR } from '@/lib/ir'
+import { type IR } from '@/lib/ir'
 import { drawBackground, drawIR } from '@/lib/render/canvas'
-import { getState, saveView, selectLayer, setState } from '@/lib/state/store'
+import { composeIR } from '@/lib/pipeline'
+import { hitTestLayers, layerBoundsFor } from '@/lib/select'
+import { layerOffset } from '@/lib/schema'
+import { commit, getState, patchProject, saveView, selectLayer, setState } from '@/lib/state/store'
 import { isTyping, isSpaceHeld, setSpaceHeld } from '@/lib/keyboard'
 import { useStore } from '@/lib/state/useStore'
 import { Button } from '@/components/ui/button'
@@ -44,14 +47,19 @@ export function Preview() {
   const renderMs = useStore((s) => s.renderMs)
   const error = useStore((s) => s.error)
   const canvas = useStore((s) => s.project.canvas)
+  const project = useStore((s) => s.project)
   const layerCount = useStore((s) => s.project.layers.length)
+  const selectedLayerId = useStore((s) => s.selectedLayerId)
 
   const ir: IR | null = useMemo(() => {
     if (!results) return null
-    const nodes = results.flatMap((r) => r.ir.nodes)
-    return buildIR(canvas.w, canvas.h, nodes)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [results, resultsVersion, canvas.w, canvas.h])
+    // composeIR (not a hand-rolled flatMap) so manual layer placement lands in
+    // the preview through the same path the exporters use. `project` is a real
+    // dependency, not a `getState()` peek: dragging mutates the layer offsets
+    // without touching `results`, so keying this on results alone would leave the
+    // artwork visually pinned while the numbers moved underneath.
+    return composeIR(project, results)
+  }, [results, project])
 
   /* observe container size */
   useEffect(() => {
@@ -64,6 +72,21 @@ export function Preview() {
     setSize({ w: el.clientWidth, h: el.clientHeight })
     return () => ro.disconnect()
   }, [])
+
+  /**
+   * Stage transform, shared by the raster blit and the selection overlay so the
+   * box can never drift from the pixels it is drawn over.
+   */
+  const view = useMemo(() => {
+    if (!ir || !size.w || !size.h) return null
+    const fit = Math.min(size.w / ir.w, size.h / ir.h) * 0.93
+    const scale = fit * zoom
+    return {
+      scale,
+      ox: (size.w - ir.w * scale) / 2 + panX,
+      oy: (size.h - ir.h * scale) / 2 + panY,
+    }
+  }, [ir, zoom, panX, panY, size.w, size.h])
 
   /* ---- raster cache + draw ---------------------------------------------- */
 
@@ -85,12 +108,9 @@ export function Preview() {
 
     ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, pw, ph)
-    if (!ir) return
+    if (!ir || !view) return
 
-    const fit = Math.min(size.w / ir.w, size.h / ir.h) * 0.93
-    const scale = fit * zoom
-    const ox = (size.w - ir.w * scale) / 2 + panX
-    const oy = (size.h - ir.h * scale) / 2 + panY
+    const { scale, ox, oy } = view
     // one device-pixel grid shared by the background and the blit
     const dx = Math.round(ox * dpr)
     const dy = Math.round(oy * dpr)
@@ -151,7 +171,7 @@ export function Preview() {
 
     const r = rasterRef.current
     if (r && r.width) ctx.drawImage(r, dx, dy, dw, dh)
-  }, [ir, resultsVersion, zoom, panX, panY, size.w, size.h, canvas.bg, canvas.w, canvas.h, refine])
+  }, [ir, view, resultsVersion, size.w, size.h, canvas.bg, canvas.w, canvas.h, refine])
 
   // clear the pending sharpen on unmount only — each draw re-arms its own
   useEffect(
@@ -190,41 +210,130 @@ export function Preview() {
     [applyView],
   )
 
-  const dragRef = useRef<{ id: number; x: number; y: number; px: number; py: number } | null>(null)
+  const dragRef = useRef<{
+    id: number
+    mode: 'pan' | 'move'
+    x: number
+    y: number
+    px: number
+    py: number
+    /** IR-unit start offset of the layer being moved */
+    ox: number
+    oy: number
+    moved: boolean
+  } | null>(null)
 
-  const onPointerDown = useCallback((e: React.PointerEvent) => {
-    const space = isSpaceHeld()
-    const middle = e.button === 1
-    if (!space && !middle) {
-      // clicking empty stage deselects
-      if (e.target === canvasRef.current) selectLayer(null)
-      return
-    }
-    e.preventDefault()
-    const s = getState()
-    dragRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY, px: s.view.panX, py: s.view.panY }
-    // capture keeps pointermove flowing when the cursor leaves the stage; it
-    // throws if the pointer is already gone (coalesced pointercancel), which
-    // must never break the interaction
-    try {
-      ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
-    } catch {
-      /* synthetic or retired pointer — drag still works without capture */
-    }
-  }, [])
+  /** Screen (client) point → IR units. Null when the stage has no transform yet. */
+  const toIR = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!view) return null
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect) return null
+      return {
+        x: (clientX - rect.left - view.ox) / view.scale,
+        y: (clientY - rect.top - view.oy) / view.scale,
+      }
+    },
+    [view],
+  )
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      const space = isSpaceHeld()
+      const middle = e.button === 1
+      const s = getState()
+      if (!space && !middle) {
+        // Plain left-press on the artwork selects the topmost layer under the
+        // cursor and starts a move; empty stage still deselects.
+        if (e.target !== canvasRef.current) return
+        const p = toIR(e.clientX, e.clientY)
+        const hit = p && s.results ? hitTestLayers(s.results, s.project, p.x, p.y) : null
+        selectLayer(hit)
+        const layer = hit ? s.project.layers.find((l) => l.id === hit) : undefined
+        if (!hit || !layer || layer.locked || !p || !view) return
+        const { x, y } = layerOffset(layer)
+        dragRef.current = {
+          id: e.pointerId,
+          mode: 'move',
+          x: e.clientX,
+          y: e.clientY,
+          px: s.view.panX,
+          py: s.view.panY,
+          ox: x,
+          oy: y,
+          moved: false,
+        }
+        try {
+          ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+        } catch {
+          /* pointer already gone — the drag still works without capture */
+        }
+        return
+      }
+      e.preventDefault()
+      dragRef.current = {
+        id: e.pointerId,
+        mode: 'pan',
+        x: e.clientX,
+        y: e.clientY,
+        px: s.view.panX,
+        py: s.view.panY,
+        ox: 0,
+        oy: 0,
+        moved: false,
+      }
+      // capture keeps pointermove flowing when the cursor leaves the stage; it
+      // throws if the pointer is already gone (coalesced pointercancel), which
+      // must never break the interaction
+      try {
+        ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+      } catch {
+        /* synthetic or retired pointer — drag still works without capture */
+      }
+    },
+    [toIR, view],
+  )
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
       const d = dragRef.current
       if (!d || d.id !== e.pointerId) return
-      applyView({ panX: d.px + (e.clientX - d.x), panY: d.py + (e.clientY - d.y) })
+      if (d.mode === 'pan') {
+        applyView({ panX: d.px + (e.clientX - d.x), panY: d.py + (e.clientY - d.y) })
+        return
+      }
+      if (!view) return
+      // Screen px → IR units. view.scale is the single source of truth, so the
+      // layer tracks the cursor exactly at any zoom.
+      const dx = (e.clientX - d.x) / view.scale
+      const dy = (e.clientY - d.y) / view.scale
+      if (!d.moved && Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return
+      d.moved = true
+      const id = selectedLayerId
+      if (!id) return
+      // transient during the gesture; one coalesced commit lands on release
+      patchProject((p) => ({
+        ...p,
+        layers: p.layers.map((l) =>
+          l.id === id ? { ...l, offset: { x: d.ox + dx, y: d.oy + dy } } : l,
+        ),
+      }))
     },
-    [applyView],
+    [applyView, view, selectedLayerId],
   )
 
-  const onPointerUp = useCallback((e: React.PointerEvent) => {
-    if (dragRef.current?.id === e.pointerId) dragRef.current = null
-  }, [])
+  const onPointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      const d = dragRef.current
+      if (d?.id !== e.pointerId) return
+      dragRef.current = null
+      // Collapse the whole gesture into a single undo entry
+      if (d.mode === 'move' && d.moved && selectedLayerId) {
+        commit(getState().project, { coalesce: `move:${selectedLayerId}` })
+      }
+    },
+    [selectedLayerId],
+  )
 
   const fit = useCallback(() => {
     setState({ view: { ...getState().view, zoom: 1, panX: 0, panY: 0 } })
@@ -265,6 +374,13 @@ export function Preview() {
   const pct = Math.round(zoom * 100)
   const showProgress = generating && progress && progress.total > 1
 
+  /* selection box: geometry extent of the selected layer, in IR units. `results`
+     is a fresh array on every completed render, so its identity is the signal. */
+  const box = useMemo(
+    () => (results && selectedLayerId ? layerBoundsFor(results, project, selectedLayerId) : null),
+    [results, project, selectedLayerId],
+  )
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col bg-stage">
       <div
@@ -280,6 +396,41 @@ export function Preview() {
         style={{ touchAction: 'none' }}
       >
         <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+
+        {/* Selection box. Drawn in the same transform as the raster blit, so it
+            tracks zoom and pan exactly. Geometry extent only — a glow's visible
+            halo spills outside it, which is honest about what the layer *is*. */}
+        {box && view && (
+          <svg
+            className="pointer-events-none absolute inset-0 h-full w-full"
+            style={{ zIndex: 5 }}
+            aria-hidden="true"
+          >
+            <rect
+              x={view.ox + box.x0 * view.scale}
+              y={view.oy + box.y0 * view.scale}
+              width={Math.max(0, (box.x1 - box.x0) * view.scale)}
+              height={Math.max(0, (box.y1 - box.y0) * view.scale)}
+              fill="none"
+              stroke="var(--color-primary)"
+              strokeWidth={1}
+              strokeDasharray="5 4"
+              vectorEffect="non-scaling-stroke"
+            />
+            {([[0, 0], [1, 0], [1, 1], [0, 1]] as const).map(([fx, fy]) => (
+              <rect
+                key={`${fx}-${fy}`}
+                x={view.ox + (box.x0 + (box.x1 - box.x0) * fx) * view.scale - 3}
+                y={view.oy + (box.y0 + (box.y1 - box.y0) * fy) * view.scale - 3}
+                width={6}
+                height={6}
+                fill="var(--color-primary)"
+                stroke="var(--color-primary-foreground)"
+                strokeWidth={1}
+              />
+            ))}
+          </svg>
+        )}
 
         {layerCount === 0 && (
           <div className="pointer-events-none absolute inset-0 grid place-items-center p-6 text-center">

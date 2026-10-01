@@ -200,6 +200,14 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
     if (node.join && node.join !== 'round') attrs.push(`stroke-linejoin="${node.join}"`)
     if (node.dash) attrs.push(`stroke-dasharray="${node.dash.map((v) => fmt(v, 2)).join(' ')}"`)
     if (node.op !== undefined && node.op < 0.999) attrs.push(`opacity="${Number(node.op.toFixed(4))}"`)
+    // Manual layer placement. An element transform applies to the same user
+    // space the stroke-fade gradient's userSpaceOnUse stops live in, so the
+    // opacity ramp stays aligned with the stroke.
+    if (node.tx !== undefined || node.ty !== undefined) {
+      attrs.push(
+        `transform="translate(${fmt(node.tx ?? 0, 2)} ${fmt(node.ty ?? 0, 2)})"`,
+      )
+    }
 
     // Blend and filter go out as *presentation attributes*, which every
     // renderer understands, rather than CSS in a style="" attribute.

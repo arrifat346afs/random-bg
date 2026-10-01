@@ -90,6 +90,32 @@ Two rules the SVG backend follows because of this table:
   are exempt from the 16-primitive floor, so a one-object project can pass the
   gate if it covers enough canvas. Sparse is a penalty, not a rejection.
 
+## Layer selection and placement
+
+- **Placement is a transform, not a regeneration.** `Layer.offset` is stamped onto
+  each node as `tx`/`ty` at compose time (`composeIR`), and deliberately left out
+  of `layerCacheKey` — the cache holds untranslated geometry, so dragging reuses
+  it. Baking the offset into the geometry instead would regenerate up to 40 000
+  primitives per pointer move.
+- **The selection box is geometry-only.** A glow layer's visible halo extends
+  well past the box, which is honest about what the layer *is* (its particles)
+  rather than what it looks like. Bounds are conservative for curves: control
+  points are used, so a bezier's box never clips its own ink, but can be
+  slightly larger than the true extent.
+- **Click-to-select is bounding-box, not exact-shape.** Testing real containment
+  would mean parsing thousands of paths per click, and a click in a gap between
+  particles would select nothing. A click inside a layer's extent selects it.
+- **Moving is unbounded.** A layer can sit entirely off-canvas; it stops being
+  selected or hit-testable but is still in the layer list, still exports, and
+  still counts toward the primitive total. The quality gate will reject a
+  *randomise* that produced such a project on coverage grounds.
+- **Randomise resets placement; Mutate and Breed keep it.** A fresh random
+  project has no offsets (every layer at the origin). `mutateProject`, `breed`
+  and `variations` derive via `structuredClone`, so they preserve it.
+- **Arrows nudge, they do not pan.** Arrow keys move the selected layer 1 px
+  (10 px with shift) and collapse into one undo entry; the stage pans by
+  space-drag or middle-drag, so there is no keyboard pan to lose.
+
 ## Scale and format boundaries
 
 - **40 000 primitives per layer** (`MAX_PRIMITIVES` in `pipeline.ts`); the

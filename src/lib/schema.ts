@@ -237,6 +237,20 @@ export interface Layer {
   locks: Record<string, true>
   /** group id when the layer belongs to a group */
   groupId?: string | null
+  /**
+   * Manual placement, in canvas units, applied when the layer is drawn.
+   *
+   * Optional so every project saved before drag-to-move loads unchanged, and
+   * deliberately *absent* from `layerCacheKey` — dragging must reuse the cached
+   * IR rather than regenerating up to 40k primitives per pointer move. The
+   * offset is stamped onto nodes at compose time instead.
+   */
+  offset?: { x: number; y: number }
+}
+
+/** A layer's manual placement, defaulting to the origin. */
+export function layerOffset(l: Pick<Layer, 'offset'>): { x: number; y: number } {
+  return l.offset ?? { x: 0, y: 0 }
 }
 
 export interface LayerGroup {

@@ -127,6 +127,57 @@ let aspectFailures = 0
   } else console.log('  unlocked rolls stay in the curated pool (200/200) ✓')
 }
 
+console.log('— layer placement —')
+let placeFailures = 0
+{
+  // Dragging must never invalidate the layer cache, or every pointer move would
+  // regenerate up to 40k primitives.
+  const { createProject, createLayer } = await import('../src/lib/project')
+  const { generateLayer, composeIR, layerCacheKey } = await import('../src/lib/pipeline')
+  const { projectToSvg } = await import('../src/lib/export')
+  const { boundsOfNodes, layerBoundsFor } = await import('../src/lib/select')
+
+  const p = createProject({ seed: 11, layers: [] })
+  p.canvas = { w: 400, h: 300, bg: { kind: 'transparent' } }
+  const base = createLayer('geometric', 1)
+  const moved = { ...base, offset: { x: 100, y: 50 } }
+  const res = { ...(await generateLayer(base, p)), layerId: base.id }
+  const movedProject = { ...p, layers: [moved] }
+
+  const keySame = layerCacheKey(base, p) === layerCacheKey(moved, p)
+  if (!keySame) {
+    placeFailures++
+    console.log('  !! layer.offset changes the cache key — dragging would regenerate')
+  } else console.log('  offset leaves the layer cache key intact ✓')
+
+  const b0 = boundsOfNodes(res.ir.nodes)
+  const b1 = layerBoundsFor([res], movedProject, moved.id)
+  const boxOk =
+    !!b0 && !!b1 && Math.abs(b1.x0 - b0.x0 - 100) < 0.01 && Math.abs(b1.y0 - b0.y0 - 50) < 0.01
+  if (!boxOk) {
+    placeFailures++
+    console.log('  !! selection bounds ignore Layer.offset')
+  } else console.log('  selection bounds follow the offset ✓')
+
+  // a composed IR already carries tx/ty; adding the offset again would
+  // double-count it
+  const composed = composeIR(movedProject, [res])
+  const bc = boundsOfNodes(composed.nodes)
+  const noDouble = !!bc && !!b1 && Math.abs(bc.x0 - b1.x0) < 0.01
+  if (!noDouble) {
+    placeFailures++
+    console.log('  !! offset applied twice to a composed IR')
+  } else console.log('  offset is not double-counted on a composed IR ✓')
+
+  const { svg } = projectToSvg(movedProject, [res])
+  const stamped = composed.nodes.filter((n) => n.tx === 100 && n.ty === 50).length
+  const inSvg = (svg.match(/transform="translate\(100 50\)"/g) ?? []).length
+  if (stamped === 0 || inSvg !== stamped) {
+    placeFailures++
+    console.log(`  !! svg exports ${inSvg} translate() for ${stamped} moved nodes`)
+  } else console.log(`  svg export carries all ${inSvg} placements ✓`)
+}
+
 console.log('— svg portability —')
 if (portableFailures === 0) {
   console.log('  no renderer-hostile constructs ✓')
@@ -134,7 +185,7 @@ if (portableFailures === 0) {
   console.log(`  ${portableFailures} file(s) use constructs strict SVG renderers mishandle`)
 }
 
-if (portableFailures > 0 || aspectFailures > 0) {
+if (portableFailures > 0 || aspectFailures > 0 || placeFailures > 0) {
   console.log('FAILED')
   process.exitCode = 1
 }

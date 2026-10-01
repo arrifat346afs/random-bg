@@ -124,6 +124,14 @@ export interface Node {
   blur?: number
   /** stroke opacity ramp along a direction (used for trail fades) */
   fade?: { x1: number; y1: number; x2: number; y2: number; from?: number; to?: number }
+  /**
+   * Manual layer placement in IR units, applied at draw/export time rather than
+   * baked into `g` — so moving a layer costs a transform per node instead of a
+   * geometry rewrite and a cache miss. Canvas does `ctx.translate`, SVG emits
+   * `transform="translate(…)"`.
+   */
+  tx?: number
+  ty?: number
 }
 
 export interface IR {

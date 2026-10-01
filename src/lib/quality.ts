@@ -148,7 +148,7 @@ const luma = (r: number, g: number, b: number): number => 0.2126 * r + 0.7152 * 
  * otherwise report meaningless luma.
  */
 export function measureProject(project: Project, results: LayerResult[]): Metrics {
-  const ir = compositeLayers(results, project.canvas.w, project.canvas.h)
+  const ir = compositeLayers(project, results)
   const scale = MEASURE_W / Math.max(1, ir.w)
 
   const bare = document.createElement('canvas')

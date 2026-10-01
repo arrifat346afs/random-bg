@@ -7,7 +7,7 @@
  */
 
 import { createProject, cloneProject, ensurePaletteLinks } from '../project'
-import type { Layer, Project } from '../schema'
+import { layerOffset, type Layer, type Project } from '../schema'
 import { getPreset } from '../presets'
 import type { LayerResult } from '../pipeline'
 
@@ -340,6 +340,30 @@ export function saveView(immediate = false): void {
 export function setLockAspect(locked: boolean): void {
   setState((s) => ({ view: { ...s.view, lockAspect: locked } }))
   saveView(true)
+}
+
+/**
+ * Nudge the selected layer's manual placement by (dx, dy) canvas units.
+ *
+ * Coalesced per layer, so a run of arrow presses becomes one undo entry rather
+ * than one per keystroke (see `commit`'s 900 ms window). Returns false when
+ * there is nothing to nudge — no selection, or the layer is locked.
+ */
+export function nudgeLayer(dx: number, dy: number): boolean {
+  const s = getState()
+  const layer = s.project.layers.find((l) => l.id === s.selectedLayerId)
+  if (!layer || layer.locked) return false
+  const cur = layerOffset(layer)
+  commit(
+    {
+      ...s.project,
+      layers: s.project.layers.map((l) =>
+        l.id === layer.id ? { ...l, offset: { x: cur.x + dx, y: cur.y + dy } } : l,
+      ),
+    },
+    { coalesce: `nudge:${layer.id}` },
+  )
+  return true
 }
 
 /* ---- User presets --------------------------------------------------------- */

@@ -10,7 +10,7 @@ import { createRng, hash32 } from './rng'
 import { applyModifiers } from './modifiers'
 import { buildIR, type IR, type Node } from './ir'
 import { getGenerator, fallbackGenerator } from './generators'
-import type { GenContext, Layer, Project } from './schema'
+import { layerOffset, type GenContext, type Layer, type Project } from './schema'
 import { effectivePalette, isPaletteLinked } from './palette'
 import { getMaskSampler, identityMask } from './mask'
 
@@ -18,6 +18,12 @@ export const MAX_PRIMITIVES = 40000
 
 export interface LayerResult {
   ir: IR
+  /**
+   * Owning layer. `results` is a *filtered* list (visibility + solo), so its
+   * index does not line up with `project.layers` — anything mapping a result
+   * back to a layer (selection box, hit-testing) has to go through this.
+   */
+  layerId: string
   /** true when the primitive cap had to bite */
   truncated: boolean
   /** cache key for this result */
@@ -39,6 +45,10 @@ interface KeyMemo {
 const keyMemo = new WeakMap<Layer, KeyMemo>()
 
 export function layerCacheKey(layer: Layer, project: Project, cap = MAX_PRIMITIVES): string {
+  // NB: `layer.offset` is intentionally absent. The cache stores *untranslated*
+  // geometry; the placement is stamped onto nodes at compose time, so dragging a
+  // layer has to keep hitting this cache. Adding `offset` here would regenerate
+  // up to 40k primitives on every pointer move.
   // Linked layers render from `project.palette`, so it must be part of the
   // memo signature — otherwise editing one layer would leave others cached.
   const paletteSig = isPaletteLinked(layer.color)
@@ -200,6 +210,7 @@ export async function generateLayer(
 
   const result: LayerResult = {
     ir: buildIR(w, h, nodes),
+    layerId: layer.id,
     truncated,
     key,
     ms: Math.round((performance.now() - t0) * 100) / 100,
@@ -213,6 +224,30 @@ export function activeLayers(project: Project): Layer[] {
   const soloed = project.layers.filter((l) => l.solo && l.visible && !l.locked)
   const set = soloed.length ? soloed : project.layers
   return set.filter((l) => l.visible)
+}
+
+/**
+ * Flatten per-layer IRs into one canvas IR, stamping each node with its layer's
+ * manual placement (`Layer.offset`).
+ *
+ * The single point where offsets enter the render path — the preview and every
+ * exporter (PNG/JPG/WebP/SVG/JSON) share it, which is what keeps "what you
+ * download is what you saw" true for a moved layer. Nodes at the origin are
+ * passed through by reference; only an actually-moved layer pays a copy.
+ */
+export function composeIR(project: Project, results: LayerResult[]): IR {
+  const byId = new Map(project.layers.map((l) => [l.id, l]))
+  const nodes: Node[] = []
+  for (const r of results) {
+    const layer = byId.get(r.layerId)
+    const { x, y } = layer ? layerOffset(layer) : { x: 0, y: 0 }
+    if (x === 0 && y === 0) {
+      nodes.push(...r.ir.nodes)
+      continue
+    }
+    for (const n of r.ir.nodes) nodes.push({ ...n, tx: x, ty: y })
+  }
+  return buildIR(project.canvas.w, project.canvas.h, nodes)
 }
 
 export interface ProjectProgress {

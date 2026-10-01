@@ -11,6 +11,7 @@ import {
   undo,
   redo,
   commit,
+  nudgeLayer,
 } from '@/lib/state/store'
 import { randomise } from '@/lib/state/randomise'
 import { duplicateLayer } from '@/lib/project'
@@ -113,6 +114,19 @@ export default function App() {
           e.preventDefault()
           setDialog('settings')
           break
+        case 'arrowup':
+        case 'arrowdown':
+        case 'arrowleft':
+        case 'arrowright': {
+          // 1px nudge, 10px with shift — the only precise way to place a layer
+          // without dragging. No-ops (and does not swallow the key) when nothing
+          // is selected or the layer is locked.
+          const step = e.shiftKey ? 10 : 1
+          const dx = key === 'arrowleft' ? -step : key === 'arrowright' ? step : 0
+          const dy = key === 'arrowup' ? -step : key === 'arrowdown' ? step : 0
+          if (nudgeLayer(dx, dy)) e.preventDefault()
+          break
+        }
         case '0':
           setState({ view: { ...getState().view, zoom: 1, panX: 0, panY: 0 } })
           break

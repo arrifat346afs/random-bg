@@ -482,7 +482,7 @@ const MIN_LOG_STEP = 0.04
 const MAX_LOG_STEP = 0.25
 const MAX_RADIUS_BUCKETS = 16
 
-interface Rect {
+export interface Rect {
   x0: number
   y0: number
   x1: number
@@ -496,14 +496,16 @@ const grow = (a: Rect, b: Rect): void => {
   if (b.y1 > a.y1) a.y1 = b.y1
 }
 
+const boundsMemo = new WeakMap<Node, Rect | null>()
 /**
  * Conservative extent of one node in IR units (control points bound curves).
+ *
  * Memoised: with per-node clipping this is asked twice per draw (once for the
- * clip, once to price the filter budget), and replaying a long path through
- * the parser twice is not free.
+ * clip, once to price the filter budget), and replaying a long path through the
+ * parser twice is not free. Exported because the selection box and canvas
+ * hit-testing want the same answer rather than a second parser.
  */
-const boundsMemo = new WeakMap<Node, Rect | null>()
-function nodeBounds(n: Node): Rect | null {
+export function nodeBounds(n: Node): Rect | null {
   const hit = boundsMemo.get(n)
   if (hit !== undefined) return hit
   const r = computeBounds(n)
@@ -694,29 +696,51 @@ export function drawNodes(
   let ops = 0
   let i = 0
   while (i < nodes.length) {
-    const node = nodes[i]
-    const blurred = (node.blur ?? 0) > 0.05
-    if (blurred && o.canFilter && isAdditive(node.blend)) {
-      // additive runs may be regrouped, so price both strategies and keep the
-      // cheaper one — see drawAdditiveRun
-      let j = i
-      while (j < nodes.length && isAdditive(nodes[j].blend)) j++
-      ops += drawAdditiveRun(ctx, nodes, i, j, o, ops)
-      i = j
-      continue
+    // Manual layer placement. Nodes are emitted layer by layer, so a contiguous
+    // run shares one offset — translate once for the run rather than paying a
+    // save/restore per primitive. This has to happen *before* the blur clip is
+    // priced, because deviceFilterArea maps the node's bounds through the
+    // current transform.
+    const tx = nodes[i].tx ?? 0
+    const ty = nodes[i].ty ?? 0
+    const moved = tx !== 0 || ty !== 0
+    if (moved) {
+      ctx.save()
+      ctx.translate(tx, ty)
     }
-    if (blurred && o.canFilter) {
-      // a non-additive node must keep its exact place in the sequence, so the
-      // only option left is the clipped direct draw
-      if (ops < MAX_FILTERED_OPS && takeFilterPx(deviceFilterArea(ctx, node, o))) {
-        ops++
-        drawNode(ctx, node, o)
-      } else drawNode(ctx, node, { ...o, skipBlur: true })
-      i++
-      continue
+    let end = i
+    while (end < nodes.length && (nodes[end].tx ?? 0) === tx && (nodes[end].ty ?? 0) === ty) end++
+
+    let j = i
+    while (j < end) {
+      const node = nodes[j]
+      const blurred = (node.blur ?? 0) > 0.05
+      if (blurred && o.canFilter && isAdditive(node.blend)) {
+        // additive runs may be regrouped, so price both strategies and keep the
+        // cheaper one — see drawAdditiveRun. `end` is the cap so a run never
+        // straddles two placements.
+        let k = j
+        while (k < end && isAdditive(nodes[k].blend)) k++
+        ops += drawAdditiveRun(ctx, nodes, j, k, o, ops)
+        j = k
+        continue
+      }
+      if (blurred && o.canFilter) {
+        // a non-additive node must keep its exact place in the sequence, so the
+        // only option left is the clipped direct draw
+        if (ops < MAX_FILTERED_OPS && takeFilterPx(deviceFilterArea(ctx, node, o))) {
+          ops++
+          drawNode(ctx, node, o)
+        } else drawNode(ctx, node, { ...o, skipBlur: true })
+        j++
+        continue
+      }
+      drawNode(ctx, node, o)
+      j++
     }
-    drawNode(ctx, node, o)
-    i++
+
+    if (moved) ctx.restore()
+    i = end
   }
   return ops
 }
