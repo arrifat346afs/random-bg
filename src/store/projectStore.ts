@@ -30,7 +30,7 @@ import { KEYS, loadJSON, saveJSON } from './persistence'
 import { useRenderStore } from './renderStore'
 import { useUiStore } from './uiStore'
 import { getPreset } from '../lib/presets'
-import { createProject, ensurePaletteLinks } from '../lib/project'
+import { createProject, ensurePaletteLinks, ensureProjectFilters } from '../lib/project'
 
 /** Store-facing commit options: the history policy plus a selection change. */
 export interface CommitOpts extends CommitPolicy {
@@ -43,9 +43,11 @@ function loadInitialProject(): Project {
   if (saved && saved.v === 1 && Array.isArray(saved.layers)) {
     // validate that referenced generators still exist at use-time
     if (!saved.palette) saved.palette = { colors: ['#ffffff', '#000000'] }
+    ensureProjectFilters(saved)
     return ensurePaletteLinks(saved)
   }
   const preset = getPreset('gold-dust') ?? createProject({ layers: ['particles', 'bokeh'] })
+  ensureProjectFilters(preset)
   return ensurePaletteLinks(preset)
 }
 
@@ -199,7 +201,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => ({
    * closed gallery, since it shows variations of the project being replaced.
    */
   applyProject: (project, opts = {}) => {
-    const next = ensurePaletteLinks(project)
+    const next = ensurePaletteLinks(ensureProjectFilters(project))
     get().commit(next, { silent: true })
     set({
       past: [],

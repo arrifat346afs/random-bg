@@ -4,12 +4,37 @@
  * Blend modes map to `globalCompositeOperation`, blurs to `ctx.filter`, and
  * gradients are built from the same stop data the SVG backend uses, so the
  * preview and the export stay visually identical.
+ *
+ * Every clip and every offscreen surface in here is sized by `renderBounds`
+ * (./bounds) — the one function that knows how far a layer's pixels can reach.
+ * Never derive a clip from a node's bare geometry: a blur, glow, shadow or
+ * displacement that reaches the edge of an internal rectangle is cut off with a
+ * hard straight edge instead of fading out.
  */
 
 import { hexToRgb, type Palette } from '../palette'
 import { createRng, hash32 } from '../rng'
 import type { BlendMode, IR, Node, Paint } from '../ir'
-import type { BackgroundSpec } from '../schema'
+import type { BackgroundSpec, FilterInstance } from '../schema'
+import { applyFilterStack } from '../filters/canvas'
+import {
+  ANTIALIAS_SLACK_PX,
+  deviceBounds,
+  matrixScale,
+  nodeLocalBounds,
+  renderBounds,
+  surfaceRect,
+} from './reach'
+import { growRect, padRect, rectArea, type Rect } from './bounds'
+import { drawSvgPath } from './path'
+import {
+  SURFACE_PX_CEILING,
+  acquireScratch,
+  fitDownscale,
+  releaseAllScratches,
+  releaseScratch,
+  type Surface,
+} from './scratch'
 
 export function cssColor(hex: string, alpha = 1): string {
   const [r, g, b, a] = hexToRgb(hex)
@@ -117,155 +142,6 @@ function roundRect(
   ctx.closePath()
 }
 
-/**
- * Minimal SVG path parser (M/L/H/V/C/Q/Z + absolute & relative).
- * We only ever consume path data produced by our own builders, so a full
- * spec implementation is unnecessary — but arcs are handled for user-imported
- * SVG shapes in the scatter generator.
- */
-export function drawSvgPath(ctx: CanvasRenderingContext2D, d: string): void {
-  const tokens = d.match(/[a-zA-Z]|-?\d*\.?\d+(?:e[-+]?\d+)?/g)
-  if (!tokens) return
-  let i = 0
-  let cmd = ''
-  let x = 0
-  let y = 0
-  let sx = 0
-  let sy = 0
-  const num = () => {
-    const v = parseFloat(tokens[i++])
-    return Number.isFinite(v) ? v : 0
-  }
-  while (i < tokens.length) {
-    const t = tokens[i]
-    if (/[a-zA-Z]/.test(t)) {
-      cmd = t
-      i++
-    } else if (!cmd) {
-      i++
-      continue
-    }
-    switch (cmd) {
-      case 'M': {
-        x = num()
-        y = num()
-        ctx.moveTo(x, y)
-        sx = x
-        sy = y
-        cmd = 'L'
-        break
-      }
-      case 'm': {
-        x += num()
-        y += num()
-        ctx.moveTo(x, y)
-        sx = x
-        sy = y
-        cmd = 'l'
-        break
-      }
-      case 'L': {
-        x = num()
-        y = num()
-        ctx.lineTo(x, y)
-        break
-      }
-      case 'l': {
-        x += num()
-        y += num()
-        ctx.lineTo(x, y)
-        break
-      }
-      case 'H': {
-        x = num()
-        ctx.lineTo(x, y)
-        break
-      }
-      case 'h': {
-        x += num()
-        ctx.lineTo(x, y)
-        break
-      }
-      case 'V': {
-        y = num()
-        ctx.lineTo(x, y)
-        break
-      }
-      case 'v': {
-        y += num()
-        ctx.lineTo(x, y)
-        break
-      }
-      case 'C': {
-        const a = num()
-        const b = num()
-        const c = num()
-        const e = num()
-        x = num()
-        y = num()
-        ctx.bezierCurveTo(a, b, c, e, x, y)
-        break
-      }
-      case 'c': {
-        const a = x + num()
-        const b = y + num()
-        const c = x + num()
-        const e = y + num()
-        x += num()
-        y += num()
-        ctx.bezierCurveTo(a, b, c, e, x, y)
-        break
-      }
-      case 'Q': {
-        const a = num()
-        const b = num()
-        x = num()
-        y = num()
-        ctx.quadraticCurveTo(a, b, x, y)
-        break
-      }
-      case 'q': {
-        const a = x + num()
-        const b = y + num()
-        x += num()
-        y += num()
-        ctx.quadraticCurveTo(a, b, x, y)
-        break
-      }
-      case 'A': {
-        const rx = num()
-        const ry = num()
-        num() // x-axis-rotation
-        num() // large-arc
-        num() // sweep
-        x = num()
-        y = num()
-        ctx.ellipse(x, y, Math.max(0.01, rx), Math.max(0.01, ry), 0, 0, Math.PI * 2)
-        break
-      }
-      case 'a': {
-        const rx = num()
-        const ry = num()
-        num()
-        num()
-        num()
-        x += num()
-        y += num()
-        ctx.ellipse(x, y, Math.max(0.01, rx), Math.max(0.01, ry), 0, 0, Math.PI * 2)
-        break
-      }
-      case 'Z':
-      case 'z':
-        ctx.closePath()
-        x = sx
-        y = sy
-        break
-      default:
-        i++
-    }
-  }
-}
-
 /* ---- Background --------------------------------------------------------- */
 
 const noiseTiles = new Map<string, HTMLCanvasElement>()
@@ -352,6 +228,8 @@ export interface CanvasRenderOpts {
   background?: BackgroundSpec
   /** clear before drawing (default true) */
   clear?: boolean
+  /** per-layer filter stacks; omit for an unfiltered render */
+  filters?: FilterRenderOpts
 }
 
 /**
@@ -365,11 +243,12 @@ export function drawIR(
   ir: IR,
   scale: number,
   background?: BackgroundSpec,
+  filters?: FilterRenderOpts,
 ): void {
   ctx.save()
   ctx.scale(scale, scale)
   if (background) drawBackground(ctx, ir.w, ir.h, background)
-  drawNodes(ctx, ir.nodes, makeOpts(ctx, ir.nodes))
+  drawNodes(ctx, ir.nodes, makeOpts(ctx, ir.nodes, filters))
   ctx.restore()
 }
 
@@ -390,7 +269,7 @@ export function renderCanvas(
   ctx.save()
   ctx.scale(scale, scale)
   if (opts.background) drawBackground(ctx, ir.w, ir.h, opts.background)
-  drawNodes(ctx, ir.nodes, makeOpts(ctx, ir.nodes))
+  drawNodes(ctx, ir.nodes, makeOpts(ctx, ir.nodes, opts.filters))
   ctx.restore()
 }
 
@@ -406,6 +285,14 @@ export interface DrawOpts {
   px: number
   /** true while drawing into a batching scratch — the batch applies the blur */
   skipBlur?: boolean
+  /**
+   * Per-layer filter stacks keyed by layer id. A node's `lid` selects which
+   * stack (if any) applies; layers absent from this map draw unfiltered, so
+   * omitting it entirely reproduces the pre-filter path exactly.
+   */
+  layerFilters?: Record<string, FilterInstance[]>
+  /** per-layer deterministic seed for noise filters (see `filters/kit.ts`) */
+  filterSeedOf?: (layerId: string) => number
 }
 
 /* ---- Blurred-run batching ------------------------------------------------ */
@@ -456,10 +343,6 @@ const takeFilterPx = (px: number): boolean => {
 /** Safety ceiling on filtered draws; past it blur is dropped rather than hang. */
 const MAX_FILTERED_OPS = 3500
 const BATCH_MIN = 6
-/** scratch ceiling — keeps peak extra memory bounded (~64 MB) */
-const MAX_BATCH_PIXELS = 16_000_000
-/** blur spreads ~4σ before it is visually gone; pad the scratch by that much */
-const BLUR_PAD = 4
 /** below this clip area full-resolution blur is already ~1 ms — not worth a round trip */
 const DOWNSCALE_MIN_PX = 200_000
 /** never downscale a blur that would land under ~1 px in scratch space */
@@ -482,157 +365,33 @@ const MIN_LOG_STEP = 0.04
 const MAX_LOG_STEP = 0.25
 const MAX_RADIUS_BUCKETS = 16
 
-export interface Rect {
-  x0: number
-  y0: number
-  x1: number
-  y1: number
-}
-
-const grow = (a: Rect, b: Rect): void => {
-  if (b.x0 < a.x0) a.x0 = b.x0
-  if (b.y0 < a.y0) a.y0 = b.y0
-  if (b.x1 > a.x1) a.x1 = b.x1
-  if (b.y1 > a.y1) a.y1 = b.y1
-}
-
-const boundsMemo = new WeakMap<Node, Rect | null>()
 /**
- * Conservative extent of one node in IR units (control points bound curves).
- *
- * Memoised: with per-node clipping this is asked twice per draw (once for the
- * clip, once to price the filter budget), and replaying a long path through the
- * parser twice is not free. Exported because the selection box and canvas
- * hit-testing want the same answer rather than a second parser.
+ * Drop every pooled offscreen surface — called after large one-shot renders so
+ * a 4K export does not keep ~64 MB of scratch alive.
  */
-export function nodeBounds(n: Node): Rect | null {
-  const hit = boundsMemo.get(n)
-  if (hit !== undefined) return hit
-  const r = computeBounds(n)
-  boundsMemo.set(n, r)
-  return r
-}
-
-function computeBounds(n: Node): Rect | null {
-  const g = n.g
-  switch (g.k) {
-    case 'circle':
-      return { x0: g.x - g.r, y0: g.y - g.r, x1: g.x + g.r, y1: g.y + g.r }
-    case 'ellipse': {
-      const m = Math.max(g.rx, g.ry)
-      return { x0: g.x - m, y0: g.y - m, x1: g.x + m, y1: g.y + m }
-    }
-    case 'rect':
-      return {
-        x0: Math.min(g.x, g.x + g.w),
-        y0: Math.min(g.y, g.y + g.h),
-        x1: Math.max(g.x, g.x + g.w),
-        y1: Math.max(g.y, g.y + g.h),
-      }
-    case 'poly': {
-      const p = g.pts
-      if (p.length < 4) return null
-      let x0 = Infinity
-      let y0 = Infinity
-      let x1 = -Infinity
-      let y1 = -Infinity
-      for (let i = 0; i + 1 < p.length; i += 2) {
-        if (p[i] < x0) x0 = p[i]
-        if (p[i] > x1) x1 = p[i]
-        if (p[i + 1] < y0) y0 = p[i + 1]
-        if (p[i + 1] > y1) y1 = p[i + 1]
-      }
-      return { x0, y0, x1, y1 }
-    }
-    case 'path':
-      return pathBounds(g.d)
-  }
-}
-
-/**
- * Bounds of SVG path data, by replaying the parser onto a recording context.
- * Control points over-estimate the extent, which is the safe direction.
- */
-function pathBounds(d: string): Rect | null {
-  const b: Rect = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
-  const pt = (x: number, y: number) => {
-    if (!(Number.isFinite(x) && Number.isFinite(y))) return
-    if (x < b.x0) b.x0 = x
-    if (x > b.x1) b.x1 = x
-    if (y < b.y0) b.y0 = y
-    if (y > b.y1) b.y1 = y
-  }
-  const rec = {
-    moveTo: pt,
-    lineTo: pt,
-    closePath: () => {},
-    quadraticCurveTo: (cx: number, cy: number, x: number, y: number) => {
-      pt(cx, cy)
-      pt(x, y)
-    },
-    bezierCurveTo: (a1: number, b1: number, a2: number, b2: number, x: number, y: number) => {
-      pt(a1, b1)
-      pt(a2, b2)
-      pt(x, y)
-    },
-    ellipse: (x: number, y: number, rx: number, ry: number) => {
-      pt(x - rx, y - ry)
-      pt(x + rx, y + ry)
-    },
-    arc: (x: number, y: number, r: number) => {
-      pt(x - r, y - r)
-      pt(x + r, y + r)
-    },
-    arcTo: (x1: number, y1: number) => pt(x1, y1),
-    rect: (x: number, y: number, w: number, h: number) => {
-      pt(x, y)
-      pt(x + w, y + h)
-    },
-  }
-  try {
-    drawSvgPath(rec as unknown as CanvasRenderingContext2D, d)
-  } catch {
-    return null
-  }
-  if (!Number.isFinite(b.x0) || !Number.isFinite(b.y0)) return null
-  return b
-}
-
-interface Scratch {
-  c: HTMLCanvasElement
-  x: CanvasRenderingContext2D | null
-}
-let scratch: Scratch | null = null
-
-function getScratch(w: number, h: number): Scratch | null {
-  if (w <= 0 || h <= 0 || w * h > MAX_BATCH_PIXELS) return null
-  if (typeof document === 'undefined') return null
-  if (!scratch) scratch = { c: document.createElement('canvas'), x: null }
-  if (scratch.c.width !== w || scratch.c.height !== h) {
-    scratch.c.width = w
-    scratch.c.height = h
-    scratch.x = null
-  }
-  if (!scratch.x) scratch.x = scratch.c.getContext('2d')
-  return scratch.x ? scratch : null
-}
-
-/** Drop the batching scratch — called after large one-shot renders. */
 export function releaseRenderScratch(): void {
-  if (!scratch) return
-  scratch.c.width = 0
-  scratch.c.height = 0
-  scratch.x = null
-  scratch = null
+  releaseAllScratches()
 }
 
-function makeOpts(ctx: CanvasRenderingContext2D, nodes: Node[]): DrawOpts {
+function makeOpts(
+  ctx: CanvasRenderingContext2D,
+  nodes: Node[],
+  filters?: FilterRenderOpts,
+): DrawOpts {
   const t = ctx.getTransform()
   return {
     canFilter: supportsFilter(ctx),
     hasFade: nodes.some((n) => n.fade),
     px: Math.hypot(t.a, t.b) || 1,
+    layerFilters: filters?.layerFilters,
+    filterSeedOf: filters?.filterSeedOf,
   }
+}
+
+/** Filter stacks to apply, keyed by layer id. */
+export interface FilterRenderOpts {
+  layerFilters?: Record<string, FilterInstance[]>
+  filterSeedOf?: (layerId: string) => number
 }
 
 /** `blur()` in device px that reproduces SVG's `stdDeviation` in user units. */
@@ -643,43 +402,40 @@ const blurPx = (node: Node, o: DrawOpts): string =>
  * Intersect the clip with this node's own extent before a filtered draw.
  *
  * `ctx.filter` rasterises into a temporary layer sized by the **clip**, not by
- * the shape — on a software rasteriser a blur over a 719² surface costs
- * ~3.8 ms, the same blur clipped to a 40² box around the shape costs ~0.03 ms
- * (130× cheaper). Everything a blurred node can reach is bounded by its extent
- * grown by ~4σ, so the clip removes nothing visible (the Gaussian tail at 4σ is
- * 0.03 %) while removing essentially all of the cost.
+ * the shape — on a software rasteriser a blur over a 719² surface costs ~3.8 ms,
+ * the same blur clipped to a 40² box around the shape costs ~0.03 ms (130×
+ * cheaper). So the clip is worth having, but it must be the node's *expanded*
+ * extent (`nodeLocalBounds`: geometry + stroke + 3σ of its own blur), never its
+ * bare geometry — clipping to the geometry sliced the glow off at the shape's
+ * own rectangle.
  *
- * Returns false when the extent is undeterminable, in which case the clip is
- * left alone — correct, just the slow path.
+ * The rect is expressed in user units, so the CTM's translate/scale applies to
+ * it exactly as it does to the shape. Returns false when the extent is
+ * undeterminable, in which case the clip is left alone — correct, just slow.
  */
-function clipToNode(ctx: CanvasRenderingContext2D, node: Node, o: DrawOpts): boolean {
-  const b = nodeBounds(node)
+function clipToNode(ctx: CanvasRenderingContext2D, node: Node): boolean {
+  const b = nodeLocalBounds(node)
   if (!b) return false
-  // 4σ of blur + half the stroke width + one device pixel of antialias slack
-  const pad = (node.blur ?? 0) * 4 + (node.sw ?? 0) * 0.5 + 1 / (o.px || 1)
-  const w = b.x1 - b.x0
-  const h = b.y1 - b.y0
-  if (!(w >= 0 && h >= 0)) return false
   ctx.beginPath()
-  ctx.rect(b.x0 - pad, b.y0 - pad, w + pad * 2, h + pad * 2)
+  ctx.rect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0)
   ctx.clip()
   return true
 }
 
 /**
- * Device pixels the filtered layer for this node will cover — the quantity
- * that actually decides render time. Unknown extents cost a full canvas.
+ * Device pixels the filtered layer for this node will cover — the quantity that
+ * actually decides render time. Priced from the same expanded extent the clip
+ * uses, so the estimate and the draw can never disagree. Unknown extents cost a
+ * full canvas.
  */
-function deviceFilterArea(ctx: CanvasRenderingContext2D, node: Node, o: DrawOpts): number {
+function deviceFilterArea(ctx: CanvasRenderingContext2D, node: Node): number {
   const cw = ctx.canvas.width
   const ch = ctx.canvas.height
-  const b = nodeDeviceBounds(node, ctx.getTransform())
+  const b = nodeLocalBounds(node)
   if (!b) return cw * ch
-  const pad = ((node.blur ?? 0) * 4 + (node.sw ?? 0) * 0.5 + 1 / (o.px || 1)) * o.px
-  const w = b.x1 - b.x0 + pad * 2
-  const h = b.y1 - b.y0 + pad * 2
-  if (!(w > 0 && h > 0)) return 0
-  return Math.min(w * h, cw * ch)
+  // one device pixel of antialias slack, expressed in user units
+  const d = deviceBounds(padRect(b, 1 / (ctx.getTransform().a || 1)), ctx.getTransform())
+  return Math.min(rectArea(d), cw * ch)
 }
 
 /**
@@ -696,6 +452,20 @@ export function drawNodes(
   let ops = 0
   let i = 0
   while (i < nodes.length) {
+    // Per-layer filter stack. `composeIR` stamps `lid` on every node of a
+    // filtered layer and nothing else, so a contiguous run sharing one `lid`
+    // is exactly one layer's geometry. That whole run is rasterised offscreen
+    // and filtered as a unit — the same thing SVG does with `<g filter>`.
+    const lid = nodes[i].lid
+    const filters = lid ? o.layerFilters?.[lid] : undefined
+    if (lid && filters && filters.length > 0) {
+      let end = i
+      while (end < nodes.length && nodes[end].lid === lid) end++
+      drawFilteredRun(ctx, nodes, i, end, filters, o)
+      i = end
+      continue
+    }
+
     // Manual layer placement. Nodes are emitted layer by layer, so a contiguous
     // run shares one offset — translate once for the run rather than paying a
     // save/restore per primitive. This has to happen *before* the blur clip is
@@ -728,7 +498,7 @@ export function drawNodes(
       if (blurred && o.canFilter) {
         // a non-additive node must keep its exact place in the sequence, so the
         // only option left is the clipped direct draw
-        if (ops < MAX_FILTERED_OPS && takeFilterPx(deviceFilterArea(ctx, node, o))) {
+        if (ops < MAX_FILTERED_OPS && takeFilterPx(deviceFilterArea(ctx, node))) {
           ops++
           drawNode(ctx, node, o)
         } else drawNode(ctx, node, { ...o, skipBlur: true })
@@ -745,31 +515,158 @@ export function drawNodes(
   return ops
 }
 
-/** A blurred node plus its device-space extent (null when undeterminable). */
+/**
+ * Render one layer's nodes offscreen, run the filter stack over the pixels, and
+ * composite the result — the canvas half of the pair whose SVG half is
+ * `<g filter="url(#…)">`.
+ *
+ * Compositing deliberately mirrors SVG exactly: node blend modes stay *inside*
+ * the offscreen surface (so additive glow still accumulates), and the filtered
+ * surface lands on the backdrop `source-over`. That is what makes preview and
+ * export agree without either backend needing to know about the other's
+ * grouping rules.
+ *
+ * The surface and the composite clip are **the same rectangle**, and that
+ * rectangle comes from `renderBounds`: the run's geometry grown by every node's
+ * stroke and blur and by every filter's declared `spread`, then clamped to the
+ * canvas. Nothing else may size it. When it did not — when the margin was
+ * derived from the geometry alone — a blurred additive layer was sliced along
+ * the surface's own edge with a hard, straight seam.
+ *
+ * The surface is borrowed from the depth-indexed pool, because the nested
+ * `drawNodes` below may itself want a surface (a `drawBlurredWide` or
+ * `drawBatch` node) and must never be handed the one in use here.
+ */
+function drawFilteredRun(
+  ctx: CanvasRenderingContext2D,
+  nodes: Node[],
+  i: number,
+  j: number,
+  filters: FilterInstance[],
+  o: DrawOpts,
+): void {
+  const t = ctx.getTransform()
+  const cw = ctx.canvas.width
+  const ch = ctx.canvas.height
+  const run = nodes.slice(i, j)
+  const tx = nodes[i].tx ?? 0
+  const ty = nodes[i].ty ?? 0
+
+  // One rect for the surface *and* the composite clip, from the one bounds
+  // function. `scale` converts the device surface back to IR units so the canvas
+  // clamp and the canvas-relative filter spreads are expressed in the same
+  // space the render bounds are computed in.
+  const scale = matrixScale(t) || 1
+  const spreadCtx = { width: Math.max(1, cw / scale), height: Math.max(1, ch / scale) }
+  const expanded = renderBounds(run, {
+    filters,
+    width: spreadCtx.width,
+    height: spreadCtx.height,
+    spreadCtx,
+  })
+  const rect = expanded
+    ? surfaceRect(deviceBounds(expanded, t), cw, ch)
+    : surfaceRect({ x0: 0, y0: 0, x1: cw, y1: ch }, cw, ch)
+  if (!rect) return
+  const { x0, y0, x1, y1 } = rect
+  const w = x1 - x0
+  const h = y1 - y0
+
+  const s = acquireScratch(w, h)
+  if (!s || !s.x) {
+    // No canvas to filter on (headless). Draw unfiltered rather than dropping
+    // the layer — the filters need real pixels, and there are none here.
+    drawRunPlain(ctx, nodes, i, j, o, tx, ty)
+    return
+  }
+
+  try {
+    const sx = s.x
+    sx.setTransform(1, 0, 0, 1, 0, 0)
+    sx.filter = 'none'
+    sx.globalCompositeOperation = 'source-over'
+    sx.globalAlpha = 1
+    sx.clearRect(0, 0, w, h)
+    // identical user→device mapping as the target, shifted by the surface origin
+    sx.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0)
+    // The nested draw must not re-arm the global pixel budget, or a layer with
+    // a filter stack would get a fresh one and blow the ceiling.
+    const budget = filterPxLeft
+    drawNodes(sx, run, { ...o, skipBlur: false, layerFilters: undefined })
+    filterPxLeft = budget
+
+    const filtered = applyOffscreen(s, w, h, filters, nodes[i].lid ?? '', o)
+
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.beginPath()
+    ctx.rect(x0, y0, w, h)
+    ctx.clip()
+    ctx.globalCompositeOperation = 'source-over'
+    ctx.globalAlpha = 1
+    ctx.filter = 'none'
+    ctx.drawImage(filtered, x0, y0)
+    ctx.restore()
+  } finally {
+    releaseScratch(s)
+  }
+}
+
+/** Apply the stack to an offscreen surface, returning the surface to blit. */
+function applyOffscreen(
+  s: Surface,
+  w: number,
+  h: number,
+  filters: FilterInstance[],
+  lid: string,
+  o: DrawOpts,
+): HTMLCanvasElement {
+  const sx = s.x
+  if (!sx) return s.c
+  const img = sx.getImageData(0, 0, w, h)
+  const seed = o.filterSeedOf?.(lid) ?? 0
+  const out = applyFilterStack(img.data, w, h, filters, seed)
+  img.data.set(out)
+  sx.setTransform(1, 0, 0, 1, 0, 0)
+  sx.putImageData(img, 0, 0)
+  return s.c
+}
+
+/** Unfiltered fallback for a run, honouring its shared manual placement. */
+function drawRunPlain(
+  ctx: CanvasRenderingContext2D,
+  nodes: Node[],
+  i: number,
+  j: number,
+  o: DrawOpts,
+  tx: number,
+  ty: number,
+): void {
+  const moved = tx !== 0 || ty !== 0
+  if (moved) {
+    ctx.save()
+    ctx.translate(tx, ty)
+  }
+  const inner: DrawOpts = { ...o, layerFilters: undefined }
+  for (let k = i; k < j; k++) drawNode(ctx, nodes[k], inner)
+  if (moved) ctx.restore()
+}
+
+/**
+ * A blurred node plus its device-space extent (null when undeterminable).
+ * The extent is the node's *expanded* bounds — geometry plus stroke plus its own
+ * blur reach — because it is what the batch surface and its clip are sized from.
+ */
 interface Blurred {
   n: Node
   b: Rect | null
 }
 
-/** Node extent mapped through the current transform (4 corners bound a rotate). */
-function nodeDeviceBounds(n: Node, t: DOMMatrix): Rect | null {
-  const b = nodeBounds(n)
+/** Node extent (expanded) mapped through the current transform. */
+function nodeDeviceBounds(n: Node, t: { a: number; b: number; c: number; d: number; e: number; f: number }): Rect | null {
+  const b = nodeLocalBounds(n)
   if (!b) return null
-  const xs = [b.x0, b.x1, b.x0, b.x1]
-  const ys = [b.y0, b.y0, b.y1, b.y1]
-  let x0 = Infinity
-  let y0 = Infinity
-  let x1 = -Infinity
-  let y1 = -Infinity
-  for (let k = 0; k < 4; k++) {
-    const x = t.a * xs[k] + t.c * ys[k] + t.e
-    const y = t.b * xs[k] + t.d * ys[k] + t.f
-    if (x < x0) x0 = x
-    if (x > x1) x1 = x
-    if (y < y0) y0 = y
-    if (y > y1) y1 = y
-  }
-  return { x0, y0, x1, y1 }
+  return deviceBounds(b, t)
 }
 
 function drawAdditiveRun(
@@ -795,12 +692,13 @@ function drawAdditiveRun(
   let ops = opsIn
   const fallback: Blurred[] = []
 
-  // extent of the run in device space
+  // extent of the run in device space. Each member's rect is already grown by
+  // its own stroke and 3σ of blur, so the union needs no further padding.
   const union: Rect = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
   let complete = true
   for (const e of blurred) {
     if (!e.b) complete = false
-    else grow(union, e.b)
+    else growRect(union, e.b)
   }
   if (!complete || !Number.isFinite(union.x0)) {
     union.x0 = 0
@@ -809,11 +707,11 @@ function drawAdditiveRun(
     union.y1 = ch
   }
 
-  // Tile the run when one scratch would exceed the memory ceiling: tiles keep
+  // Tile the run when one surface would exceed the memory ceiling: tiles keep
   // peak extra memory bounded without inflating the batch count much.
   const uw = Math.max(1, union.x1 - union.x0)
   const uh = Math.max(1, union.y1 - union.y0)
-  const tiles = Math.min(8, Math.max(1, Math.ceil((uw * uh) / MAX_BATCH_PIXELS)))
+  const tiles = Math.min(8, Math.max(1, Math.ceil((uw * uh) / SURFACE_PX_CEILING)))
   const alongX = uw >= uh
   const span = (alongX ? uw : uh) / tiles
   const tileOf = (b: Rect): number => {
@@ -856,7 +754,7 @@ function drawAdditiveRun(
     const hit = groups.get(key)
     if (hit) {
       hit.list.push(e)
-      grow(hit.rect, e.b)
+      growRect(hit.rect, e.b)
     } else {
       groups.set(key, { list: [e], rect: { ...e.b } })
     }
@@ -866,9 +764,9 @@ function drawAdditiveRun(
     // One filtered layer of the group's extent, or one clipped filter per
     // member. Whichever covers fewer pixels wins — a dense field of tiny
     // sparks is cheaper one-by-one, a handful of canvas-sized veils is not.
-    const area = groupArea(ctx, group.rect, group.list[0].n, o)
+    const area = groupArea(ctx, group.rect)
     let members = 0
-    for (const e of group.list) members += deviceFilterArea(ctx, e.n, o)
+    for (const e of group.list) members += deviceFilterArea(ctx, e.n)
     if (
       area < members &&
       group.list.length >= BATCH_MIN &&
@@ -880,7 +778,7 @@ function drawAdditiveRun(
   }
 
   for (const e of fallback) {
-    if (ops < MAX_FILTERED_OPS && takeFilterPx(deviceFilterArea(ctx, e.n, o))) {
+    if (ops < MAX_FILTERED_OPS && takeFilterPx(deviceFilterArea(ctx, e.n))) {
       ops++
       drawNode(ctx, e.n, o)
     } else drawNode(ctx, e.n, { ...o, skipBlur: true })
@@ -888,20 +786,18 @@ function drawAdditiveRun(
   return ops - opsIn
 }
 
-/** Device pixels one filtered layer would cover for a group of this extent. */
-function groupArea(
-  ctx: CanvasRenderingContext2D,
-  rect: Rect,
-  sample: Node,
-  o: DrawOpts,
-): number {
+/**
+ * Device pixels one filtered layer would cover for a group of this extent.
+ *
+ * Priced from the *same* rect `drawBatch` allocates, so "is one batch cheaper
+ * than N clipped draws?" is answered with the numbers that will actually be
+ * spent — the two used to re-derive the margin separately and could disagree.
+ */
+function groupArea(ctx: CanvasRenderingContext2D, rect: Rect): number {
   const cw = ctx.canvas.width
   const ch = ctx.canvas.height
-  const pad = ((sample.blur ?? 0) * BLUR_PAD + (sample.sw ?? 0) * 0.5 + 1 / (o.px || 1)) * o.px
-  const w = rect.x1 - rect.x0 + pad * 2
-  const h = rect.y1 - rect.y0 + pad * 2
-  if (!(w > 0 && h > 0)) return Infinity
-  return Math.min(w * h, cw * ch)
+  const r = surfaceRect(padRect(rect, ANTIALIAS_SLACK_PX), cw, ch)
+  return r ? Math.min(rectArea(r), cw * ch) : Infinity
 }
 
 /**
@@ -915,45 +811,49 @@ function drawBatch(ctx: CanvasRenderingContext2D, group: Blurred[], o: DrawOpts)
   const cw = ctx.canvas.width
   const ch = ctx.canvas.height
   const blur = group[0].n.blur ?? 0.1
-  const pad = BLUR_PAD * blur * o.px + 2
+  // every member's rect already includes its own 3σ of blur, so the union needs
+  // only antialias slack — re-deriving the margin here is what used to make the
+  // batch surface smaller than the blur it was about to apply.
   const rect: Rect = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
-  for (const e of group) if (e.b) grow(rect, e.b)
+  for (const e of group) if (e.b) growRect(rect, e.b)
   if (!Number.isFinite(rect.x0)) return false
-  const x0 = Math.max(0, Math.floor(rect.x0 - pad))
-  const y0 = Math.max(0, Math.floor(rect.y0 - pad))
-  const x1 = Math.min(cw, Math.ceil(rect.x1 + pad))
-  const y1 = Math.min(ch, Math.ceil(rect.y1 + pad))
+  const surf = surfaceRect(padRect(rect, ANTIALIAS_SLACK_PX), cw, ch)
+  if (!surf) return false
+  const { x0, y0, x1, y1 } = surf
   const w = x1 - x0
   const h = y1 - y0
-  if (w <= 0 || h <= 0) return false
-  const s = getScratch(w, h)
+  const s = acquireScratch(w, h)
   if (!s || !s.x) return false
-  // the whole group shares one filtered layer of w×h — that is the cost
-  if (!takeFilterPx(w * h)) return false
-  const sx = s.x
-  sx.setTransform(1, 0, 0, 1, 0, 0)
-  sx.filter = 'none'
-  sx.globalCompositeOperation = 'source-over'
-  sx.globalAlpha = 1
-  sx.clearRect(0, 0, w, h)
-  // identical user→device mapping as the target, shifted by the scratch origin
-  sx.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0)
-  const inner: DrawOpts = { ...o, skipBlur: true }
-  for (const e of group) drawNode(sx, e.n, inner)
+  try {
+    // the whole group shares one filtered layer of w×h — that is the cost
+    if (!takeFilterPx(w * h)) return false
+    const sx = s.x
+    sx.setTransform(1, 0, 0, 1, 0, 0)
+    sx.filter = 'none'
+    sx.globalCompositeOperation = 'source-over'
+    sx.globalAlpha = 1
+    sx.clearRect(0, 0, w, h)
+    // identical user→device mapping as the target, shifted by the surface origin
+    sx.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0)
+    const inner: DrawOpts = { ...o, skipBlur: true }
+    for (const e of group) drawNode(sx, e.n, inner)
 
-  ctx.save()
-  ctx.setTransform(1, 0, 0, 1, 0, 0)
-  // size the filter layer to the group's extent: an unclipped blit filters the
-  // whole canvas, which is what used to make a batch cost 3.8 ms instead of a
-  // fraction of it (see clipToNode)
-  ctx.beginPath()
-  ctx.rect(x0, y0, w, h)
-  ctx.clip()
-  ctx.globalCompositeOperation = canvasBlend(group[0].n.blend)
-  ctx.globalAlpha = 1
-  ctx.filter = `blur(${(blur * o.px).toFixed(3)}px)`
-  ctx.drawImage(s.c, x0, y0)
-  ctx.restore()
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    // size the filter layer to the group's expanded extent: an unclipped blit
+    // filters the whole canvas, which is what used to make a batch cost 3.8 ms
+    // instead of a fraction of it (see clipToNode)
+    ctx.beginPath()
+    ctx.rect(x0, y0, w, h)
+    ctx.clip()
+    ctx.globalCompositeOperation = canvasBlend(group[0].n.blend)
+    ctx.globalAlpha = 1
+    ctx.filter = `blur(${(blur * o.px).toFixed(3)}px)`
+    ctx.drawImage(s.c, x0, y0)
+    ctx.restore()
+  } finally {
+    releaseScratch(s)
+  }
   return true
 }
 
@@ -976,7 +876,7 @@ export function drawNode(
     if (o.canFilter) {
       // clip first: the filter layer is sized by the clip, so this is where
       // essentially all of the blur cost is controlled (see clipToNode)
-      clipToNode(ctx, node, o)
+      clipToNode(ctx, node)
       ctx.filter = `blur(${blurPx(node, o)}px)`
     } else approximateBlur(ctx, node)
   }
@@ -1047,51 +947,60 @@ function drawBlurredWide(
   const sigma = (node.blur ?? 0) * o.px
   if (sigma < DOWNSCALE_MIN_SIGMA) return false
 
-  const b = nodeDeviceBounds(node, ctx.getTransform())
+  const b = nodeLocalBounds(node)
   if (!b) return false
+  const t = ctx.getTransform()
   const cw = ctx.canvas.width
   const ch = ctx.canvas.height
-  // the same pad the ordinary path would use — this is the layer it would buy
-  const pad = ((node.blur ?? 0) * 4 + (node.sw ?? 0) * 0.5 + 1 / (o.px || 1)) * o.px
-  const x0 = Math.max(0, Math.floor(b.x0 - pad))
-  const y0 = Math.max(0, Math.floor(b.y0 - pad))
-  const x1 = Math.min(cw, Math.ceil(b.x1 + pad))
-  const y1 = Math.min(ch, Math.ceil(b.y1 + pad))
+  // the node's *expanded* extent (geometry + stroke + 3σ), in device px — the
+  // same rect the ordinary clipped path would buy, so the two agree pixel for
+  // pixel. Deriving it from the bare geometry instead is what put the seam on
+  // this path's own clip boundary.
+  const surf = surfaceRect(deviceBounds(b, t), cw, ch)
+  if (!surf) return false
+  const { x0, y0, x1, y1 } = surf
   const w = x1 - x0
   const h = y1 - y0
-  if (w <= 0 || h <= 0 || w * h < DOWNSCALE_MIN_PX) return false
+  if (w * h < DOWNSCALE_MIN_PX) return false
 
-  const k = sigma >= 6 ? 0.25 : 0.5
+  // Reduce quality rather than crop when the surface would blow the memory
+  // ceiling: shrink k until it fits. The blur still covers 3σ at the new k.
+  let k = sigma >= 6 ? 0.25 : 0.5
+  k = fitDownscale(w, h, k)
+  if (w * k < 1 || h * k < 1) return false
   const sw = Math.max(1, Math.ceil(w * k))
   const sh = Math.max(1, Math.ceil(h * k))
-  const s = getScratch(sw, sh)
+  const s = acquireScratch(sw, sh)
   if (!s || !s.x) return false
 
-  const sx = s.x
-  sx.setTransform(1, 0, 0, 1, 0, 0)
-  sx.filter = 'none'
-  sx.globalCompositeOperation = 'source-over'
-  sx.globalAlpha = 1
-  sx.clearRect(0, 0, sw, sh)
-  const t = ctx.getTransform()
-  // device px → scratch px is exactly k; the CTM still owns user → device
-  sx.setTransform(t.a * k, t.b * k, t.c * k, t.d * k, (t.e - x0) * k, (t.f - y0) * k)
-  sx.filter = `blur(${(sigma * k).toFixed(3)}px)`
-  sx.globalAlpha = node.op ?? 1
-  paintShape(sx, node)
-  sx.filter = 'none'
-  sx.globalAlpha = 1
+  try {
+    const sx = s.x
+    sx.setTransform(1, 0, 0, 1, 0, 0)
+    sx.filter = 'none'
+    sx.globalCompositeOperation = 'source-over'
+    sx.globalAlpha = 1
+    sx.clearRect(0, 0, sw, sh)
+    // device px → scratch px is exactly k; the CTM still owns user → device
+    sx.setTransform(t.a * k, t.b * k, t.c * k, t.d * k, (t.e - x0) * k, (t.f - y0) * k)
+    sx.filter = `blur(${(sigma * k).toFixed(3)}px)`
+    sx.globalAlpha = node.op ?? 1
+    paintShape(sx, node)
+    sx.filter = 'none'
+    sx.globalAlpha = 1
 
-  ctx.save()
-  ctx.setTransform(1, 0, 0, 1, 0, 0)
-  ctx.beginPath()
-  ctx.rect(x0, y0, w, h)
-  ctx.clip()
-  ctx.globalCompositeOperation = canvasBlend(node.blend)
-  ctx.globalAlpha = 1
-  ctx.filter = 'none'
-  ctx.drawImage(s.c, x0, y0, w, h)
-  ctx.restore()
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.beginPath()
+    ctx.rect(x0, y0, w, h)
+    ctx.clip()
+    ctx.globalCompositeOperation = canvasBlend(node.blend)
+    ctx.globalAlpha = 1
+    ctx.filter = 'none'
+    ctx.drawImage(s.c, x0, y0, w, h)
+    ctx.restore()
+  } finally {
+    releaseScratch(s)
+  }
   return true
 }
 

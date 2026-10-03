@@ -7,8 +7,11 @@ code changes.
 
 ## The two steps
 
-1. Create `src/lib/generators/myGen.ts` exporting a `GeneratorDef`
-   (see `flow.ts` for a complete example, `geometric.ts` for a mode-based one).
+1. Create `src/lib/generators/myGen/` with one responsibility per file
+   (`index.ts`, `params.ts`, `generate.ts`, plus helpers as needed — see
+   `neon-ribbons/` for a curve-based example, `gradient-shapes/` for a
+   layout-based one, `tile-mosaic/` for a grid-based one). `index.ts` only
+   exports the `GeneratorDef` and registers nothing itself.
 2. Import it in `src/lib/generators/index.ts` and add it to `GENERATORS`.
 
 ## What a generator declares
@@ -73,18 +76,39 @@ which side of the line it falls on:
 
 - **In the set** (`particles`, `bokeh`, `flow`, `emitters`, `scatter`,
   `smoke`): it emits a *field*, and a low-teens count is always a bug.
-- **Out of the set** (`rays`, `streaks`, `geometric`, `grain`): a single
-  primitive is a legitimate, often intended, result.
+- **Out of the set** (`rays`, `streaks`, `geometric`, `grain`, `ribbons`,
+  `gradShapes`, `mosaic`): a single primitive is a legitimate, often
+  intended, result. `mosaic` is driven by `cols`/`rows` rather than `count`,
+  so the floor never applies to it in practice.
 
 The floor is enforced at render time by `emitCount`, so it also covers old
 project JSON; the set itself tells the randomiser how far it may thin a
 layer's density (`minCountFor()`).
 
+## Shared helpers for new generators
+
+- `generators/density.ts` — `alphaForLoad(base, load)`: density-aware alpha
+  so additive stacks (ribbons, dense packs) do not clip to white. Estimate
+  the overlap with `ribbonLoad()` or `count × (0.4 + overlap)` and guard the
+  per-node opacity with it.
+- `generators/shade.ts` — `lightenHex` / `darkenHex` / `shadeLadder`: the one
+  shared copy. Older generators (`scatter`, `geometric`) carry private copies
+  for historical reasons; new code uses this module.
+- `modifiers.ts#mirror` — cartesian mirror / four-way symmetry as a shared
+  post-processor (`amount` = axis angle, `secondary` = 1 or 2 planes).
+  `kaleido` (radial) and `colorByPos` already existed; `mirror` is the
+  cartesian counterpart. Generators with their own symmetry param (mosaic)
+  fold the colour source instead of duplicating nodes.
+
 ## Checklist before you call it done
 
 - `bunx tsc -p tsconfig.app.json --noEmit`, `bun run lint`, `bun run build`
-- `bun run scripts/check.ts` — renders all generators and presets
-- Add a preset or two exercising it in `src/lib/presets.ts` (tagged)
+- `bun run scripts/check.ts` — renders all generators and presets, including
+  the new-generator gates (determinism, non-empty, count limits, parameter
+  extremes), the filter gates and the pinned preset-id list
+- Add a preset or two exercising it in its own `presets.ts` (tagged), wired
+  into `src/lib/presets.ts` — the check pins every preset id, so a dropped
+  preset fails the build
 - Re-render all presets and confirm only yours changed
   (`scripts/_preset-sig.txt` is the snapshot pattern: signature every preset
   before/after via `scripts/cdp-eval.ts` and diff)

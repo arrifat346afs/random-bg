@@ -1,5 +1,5 @@
 /**
- * presets.ts — 35 built-in projects.
+ * presets.ts — 53 built-in projects (38 originals + 15 new).
  *
  * A preset is nothing special in the data model: it is just a parameter set
  * for the same composable system, which proves the "named effects are only
@@ -10,6 +10,9 @@
 import { createLayer, createProject, newId } from './project'
 import { PRESET_PALETTES, hexToHsl, hslToHex } from './palette'
 import { parseSeed } from './rng'
+import { RIBBON_PRESETS } from './generators/neon-ribbons/presets'
+import { GRADIENT_SHAPES_PRESETS } from './generators/gradient-shapes/presets'
+import { MOSAIC_PRESETS } from './generators/tile-mosaic/presets'
 import type {
   BackgroundSpec,
   BlendMode,
@@ -1128,6 +1131,33 @@ export const PRESETS: PresetDef[] = [
       },
     ],
   },
+  ...RIBBON_PRESETS.map((r): PresetDef => ({
+    id: r.id,
+    name: r.name,
+    tags: r.tags,
+    description: r.description,
+    seed: r.seed,
+    bg: r.bg,
+    layers: [r.layer],
+  })),
+  ...GRADIENT_SHAPES_PRESETS.map((r): PresetDef => ({
+    id: r.id,
+    name: r.name,
+    tags: r.tags,
+    description: r.description,
+    seed: r.seed,
+    bg: r.bg,
+    layers: [r.layer],
+  })),
+  ...MOSAIC_PRESETS.map((r): PresetDef => ({
+    id: r.id,
+    name: r.name,
+    tags: r.tags,
+    description: r.description,
+    seed: r.seed,
+    bg: r.bg,
+    layers: [r.layer],
+  })),
 ]
 
 export const PRESET_BY_ID = new Map(PRESETS.map((p) => [p.id, p]))

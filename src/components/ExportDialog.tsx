@@ -23,9 +23,11 @@ import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { Progress } from '@/components/ui/progress'
 import { Download, Copy, Check, AlertTriangle } from 'lucide-react'
+import { useMemo } from 'react'
 import { useProjectStore } from '@/store/projectStore'
 import { useRenderStore } from '@/store/renderStore'
 import { useUiStore } from '@/store/uiStore'
+import { rasterFilteredLayers } from '@/lib/filters/attach'
 import { FallbackBox } from './export/FallbackBox'
 import { FormatPicker } from './export/FormatPicker'
 import { Row } from './export/Row'
@@ -85,6 +87,15 @@ export function ExportDialog({ open, onOpenChange }: Props) {
   const pxCapped = px > MAX_EXPORT_PIXELS
   const dimCapped = canvas.w * scale > MAX_EXPORT_DIM || canvas.h * scale > MAX_EXPORT_DIM
   const effScale = pxCapped || dimCapped ? 1 : scale
+
+  // How many layers will have to be embedded as an image because their stack
+  // uses a raster-only filter. Read through getState() and recomputed only when
+  // the dialog opens: it is modal, so the stack cannot change while it is up, and
+  // subscribing to the layer list would re-render it on every param tick.
+  const rasterLayers = useMemo(
+    () => (open ? rasterFilteredLayers(project()).length : 0),
+    [open],
+  )
   const outputW = Math.round(canvas.w * effScale)
   const outputH = Math.round(canvas.h * effScale)
 
@@ -152,7 +163,12 @@ export function ExportDialog({ open, onOpenChange }: Props) {
             copy: () => copyText(res.svg ?? ''),
           })
         }
-        setStatus({ kind: 'ok', msg: `${res.filename} · ${fmtBytes(res.bytes)} · vector` })
+        setStatus({
+          kind: res.warnings.length ? 'warn' : 'ok',
+          msg:
+            `${res.filename} · ${fmtBytes(res.bytes)} · vector` +
+            (res.warnings.length ? ` · ${res.warnings.join(' ')}` : ''),
+        })
       } else if (res.json) {
         const blob = new Blob([res.json], { type: 'application/json' })
         const ok = downloadBlob(blob, res.filename)
@@ -271,6 +287,14 @@ export function ExportDialog({ open, onOpenChange }: Props) {
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
               Above the safety cap ({MAX_EXPORT_DIM}px per edge, {MAX_EXPORT_PIXELS / 1e6} MP).
               Falling back to 1× so the browser doesn’t silently drop the file.
+            </p>
+          )}
+
+          {format === 'svg' && rasterLayers > 0 && (
+            <p className="flex items-start gap-1.5 rounded-md border border-warning/40 bg-warning/10 p-2 text-[11px] leading-snug">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+              {rasterLayers} layer{rasterLayers > 1 ? 's use' : ' uses'} a raster-only filter and
+              will be embedded as an image. Everything else stays vector.
             </p>
           )}
 

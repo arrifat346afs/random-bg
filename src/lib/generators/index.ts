@@ -3,8 +3,10 @@
  *
  * ADDING A GENERATOR
  * -------------------
- *  1. Create `src/lib/generators/myGen.ts` exporting a `GeneratorDef`
- *     (id, name, params schema, defaults, density, generate → IR nodes).
+ *  1. Create `src/lib/generators/myGen/` with one responsibility per file
+ *     (`index.ts`, `params.ts`, `generate.ts`, helpers as needed — see
+ *     `neon-ribbons/`, `gradient-shapes/`, `tile-mosaic/`).
+ *     `index.ts` only exports the `GeneratorDef`.
  *  2. Import it below and add it to `GENERATORS`.
  * That's it — the inspector, randomiser, presets and exporters pick it up
  * automatically from the registry. No UI code needs to change.
@@ -23,6 +25,9 @@ import { scatterGen } from './scatter'
 import { smokeGen } from './smoke'
 import { geometricGen } from './geometric'
 import { grainGen } from './grain'
+import { ribbonsGen } from './neon-ribbons'
+import { gradShapesGen } from './gradient-shapes'
+import { mosaicGen } from './tile-mosaic'
 
 /** Used when a project references a generator that no longer exists. */
 export const fallbackGenerator: GeneratorDef = {
@@ -49,6 +54,9 @@ export const GENERATORS: GeneratorDef[] = [
   smokeGen,
   geometricGen,
   grainGen,
+  ribbonsGen,
+  gradShapesGen,
+  mosaicGen,
 ]
 
 const byId = new Map<string, GeneratorDef>(GENERATORS.map((g) => [g.id, g]))
@@ -59,8 +67,9 @@ const byId = new Map<string, GeneratorDef>(GENERATORS.map((g) => [g.id, g]))
  * floor.
  *
  * Deliberately exempt: lens flares and hero rays (`rays`), single trails
- * (`streaks`) and shapes (`geometric`), where *one* is often the whole point,
- * plus `grain`, which has no count at all.
+ * (`streaks`), shapes (`geometric`, `gradShapes`), ribbons (`ribbons`) and
+ * grids (`mosaic`, driven by cols/rows rather than count), where *one* is
+ * often the whole point — plus `grain`, which has no count at all.
  *
  * The floor is actually enforced at render time by `kit.ts#emitCount`, whose
  * per-generator call sites are the authority — this set tells the randomiser
@@ -109,6 +118,8 @@ export const FAMILY_WEIGHTS: [string, number][] = [
   ['particles', 4],
   ['light', 3],
   ['atmosphere', 2.4],
-  ['geometry', 2],
+  // three geometry generators now (geometric + gradients + mosaic); weight
+  // raised from 2 so each one still gets drawn at a useful rate
+  ['geometry', 3],
   ['texture', 1.4],
 ]

@@ -8,9 +8,11 @@
  */
 
 import type { IR } from './ir'
+import { buildIR } from './ir'
 import { composeIR, type LayerResult } from './pipeline'
-import { renderCanvas, applyMotion, drawBackground } from './render/canvas'
+import { renderCanvas, applyMotion, drawBackground, irToCanvas } from './render/canvas'
 import { renderSVG, type SvgRenderOpts } from './render/svg'
+import { projectFilterOpts, rasterFilteredLayers } from './filters/attach'
 import type { BackgroundSpec, Project } from './schema'
 
 export type RasterFormat = 'png' | 'jpg' | 'webp'
@@ -83,17 +85,59 @@ export function projectToSvg(
   opts: Partial<SvgRenderOpts> = {},
 ): { svg: string; ir: IR; warnings: string[] } {
   const ir = compositeLayers(project, results)
+  const rasterLayers = rasterFilteredLayers(project)
   const svg = renderSVG(ir, {
     background: project.canvas.bg,
     flattenAdditive: opts.flattenAdditive,
     decimals: opts.decimals ?? 2,
     viewboxOnly: opts.viewboxOnly,
+    layerFilters: projectFilterOpts(project).layerFilters,
+    rasterImages: rasterLayers.length ? rasterLayerImages(ir, project, rasterLayers) : undefined,
   })
   const warnings: string[] = []
   if (ir.stats.additive && opts.flattenAdditive) {
     warnings.push('`plus-lighter` was flattened to `screen` for renderer compatibility.')
   }
+  if (rasterLayers.length > 0) {
+    warnings.push(
+      `${rasterLayers.length} layer${rasterLayers.length > 1 ? 's' : ''} with raster-only filter${rasterLayers.length > 1 ? 's' : ''} ` +
+        'embedded as an image.',
+    )
+  }
   return { svg, ir, warnings }
+}
+
+/**
+ * Draw each raster-only-filtered layer through the canvas pipeline and return
+ * it as a data URL for `<image>` embedding.
+ *
+ * The whole layer goes through one offscreen surface — the same path the
+ * preview and the PNG exporter use — so the embedded picture is exactly what
+ * the user was looking at, just not editable as vectors. Returns an empty map
+ * outside a browser (e.g. a Node-side sanity run), where the exporter then
+ * emits the layer unfiltered and the warning still fires.
+ */
+function rasterLayerImages(
+  ir: IR,
+  project: Project,
+  layerIds: string[],
+): Record<string, string> {
+  if (typeof document === 'undefined') return {}
+  const { layerFilters, filterSeedOf } = projectFilterOpts(project)
+  const out: Record<string, string> = {}
+  for (const layerId of layerIds) {
+    const nodes = ir.nodes.filter((n) => n.lid === layerId)
+    if (nodes.length === 0) continue
+    try {
+      const canvas = irToCanvas(buildIR(ir.w, ir.h, nodes), {
+        filters: { layerFilters: { [layerId]: layerFilters[layerId] ?? [] }, filterSeedOf },
+      })
+      out[layerId] = canvas.toDataURL('image/png')
+    } catch {
+      // a tainted or oversized canvas must not sink the whole export
+    }
+  }
+  return out
 }
 
 export async function exportProject(
@@ -138,7 +182,7 @@ export async function exportProject(
   const { scale, warnings } = clampScale(project.canvas.w, project.canvas.h, opts.scale)
   const ir = compositeLayers(project, results)
   const canvas = document.createElement('canvas')
-  renderCanvas(ir, canvas, { scale, background: bg })
+  renderCanvas(ir, canvas, { scale, background: bg, filters: projectFilterOpts(project) })
 
   let outCanvas: HTMLCanvasElement = canvas
   if (opts.format === 'jpg') {

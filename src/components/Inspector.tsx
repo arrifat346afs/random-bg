@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ColourTab } from './inspector/ColourTab'
 import { DistributeTab } from './inspector/DistributeTab'
 import { EffectsTab } from './inspector/EffectsTab'
+import { FiltersTab } from './inspector/FiltersTab'
 import { ParamsTab } from './inspector/ParamsTab'
 import { LayerHeader } from './inspector/LayerHeader'
 import { useProjectStore } from '@/store/projectStore'
@@ -42,11 +43,12 @@ export function Inspector() {
         className="flex min-h-0 flex-1 flex-col"
       >
         <div className="px-2 pt-2">
-          <TabsList className="grid w-full grid-cols-4">
+          <TabsList className="grid w-full grid-cols-5">
             <TabsTrigger value="params">Params</TabsTrigger>
             <TabsTrigger value="distribute">Distribute</TabsTrigger>
             <TabsTrigger value="colour">Colour</TabsTrigger>
             <TabsTrigger value="effects">Effects</TabsTrigger>
+            <TabsTrigger value="filters">Filters</TabsTrigger>
           </TabsList>
         </div>
 
@@ -62,6 +64,9 @@ export function Inspector() {
           </TabsContent>
           <TabsContent value="effects" className="mt-0">
             <EffectsTab layer={layer} />
+          </TabsContent>
+          <TabsContent value="filters" className="mt-0">
+            <FiltersTab layer={layer} />
           </TabsContent>
         </div>
       </Tabs>

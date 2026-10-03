@@ -25,7 +25,7 @@ interface Props {
   onOpenChange: (v: boolean) => void
 }
 
-/** Searchable, tagged browser for the 38 built-in presets + user presets. */
+/** Searchable, tagged browser for the 53 built-in presets + user presets. */
 export function PresetBrowser({ open, onOpenChange }: Props) {
   const userPresets = useLibraryStore((s) => s.userPresets)
   const q = useUiStore((s) => s.presetQuery)

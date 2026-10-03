@@ -132,6 +132,16 @@ export interface Node {
    */
   tx?: number
   ty?: number
+  /**
+   * Owning layer, stamped only for layers whose filter stack is non-empty.
+   *
+   * `composeIR` leaves this off everything else so a filter-free project
+   * serialises exactly as it did before filters existed (one string per node is
+   * real memory at 40k nodes). The SVG backend uses it to wrap each layer's
+   * contiguous run of nodes in one `<g filter>`; the canvas backend uses it to
+   * rasterise that layer separately.
+   */
+  lid?: string
 }
 
 export interface IR {

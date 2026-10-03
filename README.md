@@ -5,12 +5,15 @@ abstract overlay graphics. No AI models, no stock assets — everything is
 code/math generated through a composable layer-stack system.
 
 - `bun run dev` → app · `bun run build` → static `dist/` (zero runtime network calls)
-- `bun run scripts/check.ts` — engine verification (all generators + 38 presets)
+- `bun run scripts/check.ts` — engine verification (all generators + 53 presets
+  + the filter gates)
+- `bun run scripts/filters-parity.ts` — every filter, canvas pipeline vs librsvg
+- `bun run scripts/filters-e2e.ts` — preview vs SVG export in Chrome
 - `bun run scripts/quality20.ts` — the randomiser's acceptance gate
   (20 fixed seeds, contact sheet → `outputs/random20.png`)
 
 Docs: [adding-a-generator](docs/adding-a-generator.md) ·
-[limitations](docs/limitations.md)
+[adding-a-filter](docs/adding-a-filter.md) · [limitations](docs/limitations.md)
 
 ---
 

@@ -151,6 +151,7 @@ export type ModType =
   | 'noise'
   | 'twist'
   | 'kaleido'
+  | 'mirror'
   | 'array'
   | 'scaleByPos'
   | 'colorByPos'
@@ -246,6 +247,23 @@ export interface Layer {
    * offset is stamped onto nodes at compose time instead.
    */
   offset?: { x: number; y: number }
+  /**
+   * Ordered per-layer filter stack (Illustrator-style effects).
+   * Optional so projects saved before filters load unchanged (`[]`).
+   * Deliberately *absent* from `layerCacheKey` — changing a filter must
+   * re-apply pixels only, never regenerate geometry.
+   */
+  filters?: FilterInstance[]
+  /** bypass all filters on this layer (before/after comparison) */
+  filtersBypassed?: boolean
+}
+
+/** One entry in a layer's filter stack (mirrors `filters/types.ts`). */
+export interface FilterInstance {
+  id: string
+  type: string
+  enabled: boolean
+  params: Params
 }
 
 /** A layer's manual placement, defaulting to the origin. */
@@ -281,6 +299,11 @@ export interface Project {
   groups: LayerGroup[]
   /** animation motion (used by WebM export + preview twinkle) */
   motion: MotionSpec
+  /**
+   * Final master filter stack applied over the flattened project.
+   * Optional (legacy projects omit it); V1 stores the data, UI lands later.
+   */
+  masterFilters?: FilterInstance[]
 }
 
 export interface MotionSpec {

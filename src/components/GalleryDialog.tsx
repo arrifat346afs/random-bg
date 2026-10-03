@@ -3,6 +3,7 @@ import { useUiStore } from '@/store/uiStore'
 import { generateProject } from '@/lib/pipeline'
 import { compositeLayers } from '@/lib/export'
 import { renderCanvas } from '@/lib/render/canvas'
+import { projectFilterOpts } from '@/lib/filters/attach'
 import type { Project } from '@/lib/schema'
 import {
   Dialog,
@@ -130,7 +131,14 @@ function GalleryCard({
         if (!canvas) return
         // renderCanvas sizes the bitmap itself: target ~360px on the long edge
         const scale = 360 / Math.max(ir.w, ir.h)
-        renderCanvas(ir, canvas, { scale, background: project.canvas.bg, clear: true })
+        // the per-layer stacks too — a thumbnail that quietly dropped its glow
+        // looked nothing like the project it was standing in for
+        renderCanvas(ir, canvas, {
+          scale,
+          background: project.canvas.bg,
+          clear: true,
+          filters: projectFilterOpts(project),
+        })
         ui().setGalleryCardStatus(index, 'done')
       } catch {
         if (!cancelled) ui().setGalleryCardStatus(index, 'error')

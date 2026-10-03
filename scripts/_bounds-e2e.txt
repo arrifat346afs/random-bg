@@ -1,0 +1,459 @@
+/**
+ * scripts/_bounds-e2e.txt — in-page half of `scripts/bounds-e2e.ts`.
+ *
+ * Evaluated inside Chrome by cdp-eval.ts (see filters-e2e.ts for the pattern).
+ * Every assertion here needs real pixels, which no Node-side check can get:
+ * the bug this guards against only exists once a Canvas2D surface is involved.
+ *
+ * Returns a JSON report. Sections:
+ *   continuity  the bug case with clipping on vs clipping forced off
+ *   edges       straight-edge detector over the bug case and the 38 presets
+ *   bounds      renderBounds ⊇ every pixel, for every generator × every filter
+ *   parity      preview / canvas export / SVG export agree, none clipped
+ */
+(async () => {
+  const { drawIR, renderCanvas, releaseRenderScratch } = await import('/src/lib/render/canvas.ts')
+  const { renderBounds } = await import('/src/lib/render/reach.ts')
+  const { renderSVG } = await import('/src/lib/render/svg.ts')
+  const { projectFilterOpts } = await import('/src/lib/filters/attach.ts')
+  const { makeFilter, defaultFilterParams } = await import('/src/lib/filters/stack.ts')
+  const { FILTERS } = await import('/src/lib/filters/index.ts')
+  const { GENERATORS } = await import('/src/lib/generators/index.ts')
+  const { createProject, createLayer } = await import('/src/lib/project.ts')
+  const { generateLayer, composeIR, activeLayers } = await import('/src/lib/pipeline.ts')
+  const { PRESETS, buildPreset } = await import('/src/lib/presets.ts')
+
+  const W = 900
+  const H = 600
+  const BG = { kind: 'gradient', from: '#0a0a12', to: '#1b1024', angle: 90 }
+
+  /**
+ * Stamp every node of an IR into one filtered layer.
+ *
+ * None of the 53 shipped presets carries a filter stack, so rendering them
+ * as-is never enters `drawFilteredRun` and a clip bug there would be invisible.
+ * Forcing a stack on is what a user does the moment they add any effect, so
+ * that is the render the detector has to see.
+ */
+const forcedFilter = (ir, type) => ({
+    ...ir,
+    nodes: ir.nodes.map((n) => ({ ...n, lid: 'forced' })),
+  })
+  const forcedOpts = (type) => ({ layerFilters: { forced: [makeFilter(type)] } })
+
+  /* ---- the bug case ------------------------------------------------------
+   * One layer of arrow/shard shapes, each with its own blur and an additive
+   * blend, over a dark gradient, carrying a gaussian filter stack.
+   *
+   * Pinned here rather than generated, and deliberately **large**: the fast
+   * path that handed an outer layer's surface to an inner draw only engages
+   * once a single shape's extent exceeds ~200 k device px. Small shards take a
+   * different code path and would let this regression ship unnoticed — which is
+   * exactly what happened before this case existed.
+   */
+  const BUG_SHARDS = [
+    { cx: 250, cy: 300, len: 520, wid: 200, rot: 0.35, c: '#ff5fa2' },
+    { cx: 660, cy: 300, len: 520, wid: 200, rot: 2.1, c: '#ffffff' },
+  ]
+  const bugIR = (lid) => ({
+    w: W,
+    h: H,
+    stats: {},
+    nodes: BUG_SHARDS.map((s) => {
+      const c = Math.cos(s.rot)
+      const sn = Math.sin(s.rot)
+      const P = (x, y) => [s.cx + x * c - y * sn, s.cy + x * sn + y * c]
+      const [ax, ay] = P(0, -s.len)
+      const [bx, by] = P(s.wid, 0)
+      const [cx2, cy2] = P(0, s.len * 0.75)
+      const [dx, dy] = P(-s.wid, 0)
+      return {
+        g: { k: 'poly', pts: [ax, ay, bx, by, cx2, cy2, dx, dy] },
+        fill: { k: 'solid', c: s.c },
+        op: 0.9,
+        blend: 'plus-lighter',
+        blur: 10,
+        ...(lid ? { lid } : {}),
+      }
+    }),
+  })
+  const BUG_FILTERS = [makeFilter('gaussian-blur', { sigmaX: 6, sigmaY: 6 })]
+  const BUG_OPTS = { layerFilters: { L1: BUG_FILTERS } }
+
+  /* ---- raster helpers --------------------------------------------------- */
+  function raster(w, h, paint) {
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = h
+    paint(c.getContext('2d'), w, h)
+    return c.getContext('2d').getImageData(0, 0, w, h).data
+  }
+
+  /** Like `raster`, but the paint callback gets the canvas (renderCanvas sizes it). */
+  function rasterCanvas(w, h, paint) {
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = h
+    paint(c)
+    return { data: c.getContext('2d').getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height }
+  }
+
+  const drawBug = (px, opts) =>
+    ({ data: raster(W, H, (ctx) => drawIR(ctx, bugIR(px ? 'L1' : undefined), 1, BG, opts)), w: W, h: H })
+
+  /**
+   * Straight-edge detector.
+   *
+   * A row (or column) whose mean |luminance(x,y) - luminance(x,y-1)| exceeds
+   * `thr` across more than `frac` of the line is a hard, perfectly straight
+   * discontinuity — the signature of a clip rectangle.
+   *
+   * On its own this also fires on legitimately axis-aligned artwork (a ring, a
+   * gem, a grid), so it is used **differentially**: the same subject is
+   * rendered with its filter stack and without, and only edges present in the
+   * filtered render and absent from the unfiltered one count. A geometry edge
+   * shows up in both and is ignored; a clip edge appears only once the layer is
+   * routed through the filter path, which is exactly when the bug bit.
+   */
+  function straightEdges(d, w, h, thr, frac) {
+    const L = (i) => 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]
+    const rows = []
+    const cols = []
+    const border = 1
+    for (let y = border; y < h - border; y++) {
+      let n = 0
+      for (let x = 0; x < w; x++) {
+        const a = (y * w + x) * 4
+        const b = ((y - 1) * w + x) * 4
+        if (Math.abs(L(a) - L(b)) > thr) n++
+      }
+      if (n / w > frac) rows.push({ at: y, frac: +(n / w).toFixed(3) })
+    }
+    for (let x = border; x < w - border; x++) {
+      let n = 0
+      for (let y = 0; y < h; y++) {
+        const a = (y * w + x) * 4
+        const b = (y * w + x - 1) * 4
+        if (Math.abs(L(a) - L(b)) > thr) n++
+      }
+      if (n / h > frac) cols.push({ at: x, frac: +(n / h).toFixed(3) })
+    }
+    return { rows, cols }
+  }
+
+  /** Edges present in `withFilter` that are absent from the same subject unclipped. */
+  function clipOnlyEdges(withFilter, withoutFilter, thr, frac) {
+    const a = straightEdges(withFilter.data, withFilter.w, withFilter.h, thr, frac)
+    const b = straightEdges(withoutFilter.data, withoutFilter.w, withoutFilter.h, thr, frac)
+    const rowAt = new Set(b.rows.map((e) => e.at))
+    const colAt = new Set(b.cols.map((e) => e.at))
+    return {
+      rows: a.rows.filter((e) => !rowAt.has(e.at)),
+      cols: a.cols.filter((e) => !colAt.has(e.at)),
+      geometryRows: b.rows.length,
+      geometryCols: b.cols.length,
+    }
+  }
+
+  const inkBox = (d, w, h, alphaThr) => {
+    let x0 = 1e9
+    let y0 = 1e9
+    let x1 = -1
+    let y1 = -1
+    let n = 0
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (d[(y * w + x) * 4 + 3] > alphaThr) {
+          n++
+          if (x < x0) x0 = x
+          if (x > x1) x1 = x
+          if (y < y0) y0 = y
+          if (y > y1) y1 = y
+        }
+      }
+    }
+    return n === 0 ? null : { x0, y0, x1, y1, px: n }
+  }
+
+  /** Mean abs error over the whole buffer + the worst 16×16 block. */
+  function diff(a, b) {
+    let sum = 0
+    for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i])
+    const B = 16
+    const bw = Math.floor(a.length / 4 / B)
+    let worst = 0
+    for (let by = 0; by < Math.floor((a.length / 4 / bw) / B); by++) {
+      for (let bx = 0; bx < bw; bx++) {
+        let s = 0
+        let n = 0
+        for (let y = 0; y < B; y++) {
+          for (let x = 0; x < B; x++) {
+            const px = bx * B + x
+            const py = by * B + y
+            const idx = (py * bw * B + px) * 4
+            if (idx + 3 >= a.length) continue
+            for (let k = 0; k < 4; k++) s += Math.abs(a[idx + k] - b[idx + k])
+            n += 4
+          }
+        }
+        if (n) worst = Math.max(worst, s / n)
+      }
+    }
+    return { mean: +(sum / a.length).toFixed(4), worstBlock: +worst.toFixed(3) }
+  }
+
+  const report = {}
+
+  /* ---- 1. edge continuity: clipping on vs forced off -------------------- */
+  {
+    // No background: an opaque gradient would make every pixel "lit" and hide
+    // any content the clip lost. Alpha then measures artwork and nothing else.
+    const drawPlain = (px, opts) =>
+      raster(W, H, (ctx) => drawIR(ctx, bugIR(px ? 'L1' : undefined), 1, undefined, opts))
+    const on = drawPlain(true, BUG_OPTS)
+    // Forced off: neutralise every clip in the renderer. The surface each fast
+    // path allocates is still correctly sized, but nothing is allowed to bound
+    // it — so if the renderer's clip were too tight, `on` would differ.
+    const realClip = CanvasRenderingContext2D.prototype.clip
+    CanvasRenderingContext2D.prototype.clip = function () {}
+    let off
+    try {
+      off = drawPlain(true, BUG_OPTS)
+    } finally {
+      CanvasRenderingContext2D.prototype.clip = realClip
+    }
+    report.continuity = {
+      ...diff(on, off),
+      inkOn: inkBox(on, W, H, 1)?.px ?? 0,
+      inkOff: inkBox(off, W, H, 1)?.px ?? 0,
+    }
+  }
+
+  /* ---- 1b. aliasing invariant -------------------------------------------
+   * The root cause, stated as an assertion: a frame must never composite an
+   * offscreen surface onto itself. When one shared scratch was handed to both
+   * an outer layer surface and an inner blurred-node fast path, the inner call
+   * resized it (clearing the layer) and then blitted it onto itself — 94 % of
+   * the layer silently gone. Counting self-blits catches that directly, without
+   * having to infer it from pixels.
+   */
+  {
+    const realDraw = CanvasRenderingContext2D.prototype.drawImage
+    let selfBlits = 0
+    const sites = new Set()
+    CanvasRenderingContext2D.prototype.drawImage = function (img, ...rest) {
+      if (img && img.tagName === 'CANVAS' && img === this.canvas) {
+        selfBlits++
+        const st = (new Error().stack || '').split('\n')[2] || '?'
+        sites.add(st.trim().slice(0, 70))
+      }
+      return realDraw.call(this, img, ...rest)
+    }
+    try {
+      drawBug(true, BUG_OPTS)
+      for (let i = 0; i < 38; i++) {
+        const def = PRESETS[i]
+        if (!def) break
+        const project = buildPreset(def)
+        const results = []
+        for (const layer of activeLayers(project)) results.push(await generateLayer(layer, project))
+        const plain = composeIR(project, results)
+        raster(project.canvas.w, project.canvas.h, (ctx) =>
+          drawIR(ctx, forcedFilter(plain, 'gaussian-blur'), 1, project.canvas.bg, forcedOpts('gaussian-blur')),
+        )
+      }
+    } finally {
+      CanvasRenderingContext2D.prototype.drawImage = realDraw
+    }
+    report.aliasing = { selfBlits, sites: [...sites] }
+  }
+
+  /* ---- 2. straight edges: bug case + the 38 originals -------------------- */
+  {
+    const THR = 14
+    const FRAC = 0.25
+    // the bug case, filtered vs the same shards with no stack
+    const bug = clipOnlyEdges(drawBug(true, BUG_OPTS), drawBug(true, {}), THR, FRAC)
+
+    const presetRows = []
+    for (let i = 0; i < 38; i++) {
+      const def = PRESETS[i]
+      if (!def) break
+      const project = buildPreset(def)
+      const results = []
+      for (const layer of activeLayers(project)) results.push(await generateLayer(layer, project))
+      const w = project.canvas.w
+      const h = project.canvas.h
+      const bg = project.canvas.bg
+      const plain = composeIR(project, results)
+      const render = (ir, filterOpts) => ({
+        data: raster(w, h, (ctx) => drawIR(ctx, ir, 1, bg, filterOpts)),
+        w,
+        h,
+      })
+      // every preset, through the filter path it would take with any effect on
+      const e = clipOnlyEdges(
+        render(forcedFilter(plain, 'gaussian-blur'), forcedOpts('gaussian-blur')),
+        render(plain, undefined),
+        THR,
+        FRAC,
+      )
+      if (e.rows.length || e.cols.length) {
+        presetRows.push({ id: def.id, rows: e.rows.slice(0, 4), cols: e.cols.slice(0, 4) })
+      }
+    }
+    report.edges = { bug, presetsWithStraightEdges: presetRows, presetCount: 38 }
+  }
+
+  /* ---- 3. bounds: renderBounds must contain every lit pixel ------------
+   * Every generator × every filter, rendered with clipping neutralised so the
+   * raster is the ground truth, then compared against the same rectangle the
+   * renderer would clip to.
+   */
+  {
+    const CW = 320
+    const CH = 240
+    const realClip = CanvasRenderingContext2D.prototype.clip
+    const rows = []
+    let checked = 0
+    let worstMiss = 0
+    let failed = 0
+    CanvasRenderingContext2D.prototype.clip = function () {}
+    try {
+      for (const gen of GENERATORS) {
+        const p = createProject({ seed: 4242, layers: [] })
+        p.canvas = { w: CW, h: CH, bg: { kind: 'transparent' } }
+        const layer = createLayer(gen.id, 4242)
+        p.layers = [layer]
+        const res = await generateLayer(layer, p)
+        for (const def of FILTERS) {
+          const f = makeFilter(def.type)
+          const ir = { w: CW, h: CH, stats: {}, nodes: res.ir.nodes.map((n) => ({ ...n, lid: 'L1' })) }
+          const d = raster(CW, CH, (ctx) =>
+            drawIR(ctx, ir, 1, undefined, { layerFilters: { L1: [f] } }),
+          )
+          const box = inkBox(d, CW, CH, 1)
+          const b = renderBounds(ir.nodes, {
+            filters: [f],
+            width: CW,
+            height: CH,
+            spreadCtx: { width: CW, height: CH },
+          })
+          checked++
+          if (!box || !b) continue
+          // how far outside the declared bounds did a lit pixel land?
+          const over = Math.max(
+            b.x0 - box.x0,
+            b.y0 - box.y0,
+            box.x1 - b.x1,
+            box.y1 - b.y1,
+            0,
+          )
+          if (over > 0.5) {
+            failed++
+            worstMiss = Math.max(worstMiss, over)
+            if (rows.length < 12) {
+              rows.push({ gen: gen.id, filter: def.type, over: +over.toFixed(2), box, bounds: b })
+            }
+          }
+        }
+      }
+    } finally {
+      CanvasRenderingContext2D.prototype.clip = realClip
+    }
+
+
+    report.bounds = { checked, failed, worstMiss: +worstMiss.toFixed(2), failures: rows }
+  }
+
+  /* ---- 4. preview / canvas export / SVG export must agree -------------- */
+  {
+    const p = createProject({ seed: 99, layers: [] })
+    p.canvas = { w: W, h: H, bg: BG }
+    const layer = { ...createLayer('geometric', 99), filters: BUG_FILTERS }
+    p.layers = [layer]
+    const res = await generateLayer(layer, p)
+    const ir = composeIR(p, [res])
+    const opts = projectFilterOpts(p)
+
+    // Same background on every backend, so the comparison is about clipping
+    // and not about one of them having painted a gradient the others skipped.
+    const preview = (filterOpts) => ({
+      data: raster(W, H, (ctx) => drawIR(ctx, ir, 1, BG, filterOpts)),
+      w: W,
+      h: H,
+    })
+    const canvasExport = (filterOpts) => {
+      const r = rasterCanvas(W, H, (c) => renderCanvas(ir, c, { background: BG, filters: filterOpts }))
+      return { data: r.data, w: r.w, h: r.h }
+    }
+    const svgRaster = async (filterOpts) => {
+      const svg = renderSVG(ir, { background: BG, ...(filterOpts ?? {}) })
+      const data = await new Promise((done) => {
+        const img = new Image()
+        img.onload = () => {
+          const c = document.createElement('canvas')
+          c.width = W
+          c.height = H
+          const ctx = c.getContext('2d')
+          ctx.drawImage(img, 0, 0, W, H)
+          done(ctx.getImageData(0, 0, W, H).data)
+        }
+        img.onerror = () => done(null)
+        img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)))
+      })
+      return data ? { data, w: W, h: H } : null
+    }
+
+    const THR = 14
+    const FRAC = 0.25
+    const svgOn = await svgRaster(opts)
+    const svgOff = await svgRaster(undefined)
+    report.parity = {
+      svgBytes: renderSVG(ir, { background: BG, ...opts }).length,
+      svgDecoded: !!svgOn,
+      preview: clipOnlyEdges(preview(opts), preview(undefined), THR, FRAC),
+      export: clipOnlyEdges(canvasExport(opts), canvasExport(undefined), THR, FRAC),
+      svg: svgOn && svgOff ? clipOnlyEdges(svgOn, svgOff, THR, FRAC) : null,
+      previewVsExport: diff(preview(opts).data, canvasExport(opts).data),
+    }
+
+    /* Coverage: the worst-case subject (the bug shards) through the canvas
+     * export and the SVG export. The two blur implementations are not expected
+     * to agree pixel for pixel — but they must agree on how MUCH is there. A
+     * canvas backend that silently drops 93 % of a layer still renders a
+     * perfectly smooth image, so only a count against an independent backend
+     * catches it. */
+    const bugProject = createProject({ seed: 5, layers: [] })
+    bugProject.canvas = { w: W, h: H, bg: undefined }
+    const bugLayer = { ...createLayer('geometric', 5), filters: BUG_FILTERS }
+    bugProject.layers = [bugLayer]
+    void bugProject
+    const bugIr = { w: W, h: H, stats: {}, nodes: bugIR('L1').nodes }
+    const bugCanvas = rasterCanvas(W, H, (c) =>
+      renderCanvas(bugIr, c, { clear: true, filters: BUG_OPTS }),
+    )
+    const bugSvgText = renderSVG(bugIr, { filters: BUG_OPTS })
+    const bugSvg = await new Promise((done) => {
+      const img = new Image()
+      img.onload = () => {
+        const c = document.createElement('canvas')
+        c.width = W
+        c.height = H
+        const ctx = c.getContext('2d')
+        ctx.drawImage(img, 0, 0, W, H)
+        done(ctx.getImageData(0, 0, W, H).data)
+      }
+      img.onerror = () => done(null)
+      img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(bugSvgText)))
+    })
+    report.coverage = {
+      canvasLit: inkBox(bugCanvas.data, W, H, 1)?.px ?? 0,
+      svgLit: bugSvg ? (inkBox(bugSvg, W, H, 1)?.px ?? 0) : null,
+      svgBytes: bugSvgText.length,
+    }
+  }
+
+  releaseRenderScratch()
+  return report
+})()

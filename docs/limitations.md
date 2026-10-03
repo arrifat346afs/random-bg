@@ -31,7 +31,8 @@ deliberate tradeoff or a known boundary of the procedural approach.
 
 Exported SVG targets Inkscape, resvg, librsvg and browsers. Measured, not
 assumed — `scripts/check.ts` fails the build if a renderer-hostile construct
-reappears in generated output.
+reappears in generated output, and `scripts/filters-parity.ts` renders every
+filter through librsvg and diffs it against our own canvas pipeline.
 
 | Construct | Browser | Inkscape | librsvg |
 | --- | --- | --- | --- |
@@ -41,6 +42,10 @@ reappears in generated output.
 | `mix-blend-mode="plus-lighter"` | yes | **no — blend dropped** | **no — blend dropped** |
 | `<feGaussianBlur>` + `color-interpolation-filters="sRGB"` | yes | yes | yes |
 | Presentation attributes over `style=""` | yes | yes | yes |
+| `<feColorMatrix>` with **identical** colour rows | **no — applies the row to `(R,0,0,0,A)`** | — | **no — same** |
+| `feColorMatrix type="saturate"` with `values > 1` | yes | — | **no — silently ignored** |
+| `<feMerge>` (two inputs) | yes | yes | **no — output dropped entirely** |
+| `<feTurbulence>` / arithmetic `feComposite` | yes | partial | **partial** |
 
 Two rules the SVG backend follows because of this table:
 
@@ -52,6 +57,43 @@ Two rules the SVG backend follows because of this table:
   `screen`; a `<style>` rule upgrades browsers, which outrank presentation
   attributes in the cascade. Renderers ignoring the stylesheet degrade to
   `screen` rather than losing the blend.
+
+## Filters
+
+The per-layer filter stack compiles to **one** `<filter>` with chained
+primitives on the SVG side, and to the equivalent sequence of pixel passes on
+the canvas side. Where they genuinely differ:
+
+- **Noise and wave filters cannot match pixel-for-pixel.** `grain`, `roughen`
+  and `turbulence` use `feTurbulence` in SVG and a seeded PRNG on canvas;
+  `ripple` uses Perlin-style turbulence in SVG and a pure sine on canvas. Both
+  sides are deterministic and both are zero-mean, but the noise *pattern* is
+  genuinely different, and librsvg's `feTurbulence`/`feComposite` support is
+  partial. `scripts/filters-parity.ts` asserts these structurally (the markup
+  must keep the source and must mask the noise) plus statistically, rather than
+  pretending to a parity it cannot deliver.
+- **Morphology and glow differ by a level or two at antialiased edges.** SVG's
+  `feMorphology` carries the colour of the pixel that won; a canvas port has to
+  do that explicitly or it leaves a black halo. The gate's per-filter
+  tolerances (3–8/255) cover the remaining sampling difference.
+- **Raster-only filters are not vectors.** Motion blur, radial/zoom blur,
+  pixelate and chromatic aberration have no SVG primitive, so SVG export draws
+  that layer through the canvas pipeline and embeds it as a PNG `<image>`,
+  with a one-line notice in the export dialog and a warning on the result. The
+  rest of the file stays vector; the affected layer stops being editable in
+  Illustrator/Inkscape, and its resolution is fixed at export time.
+- **Filters are a post-process on a rasterised layer.** They run after the
+  layer's primitives are generated, so they cannot change geometry — an erode
+  moves the alpha silhouette but re-running generation would be needed to move
+  the vector itself. This is also why editing a filter never re-runs generation.
+- **Transparent exports rely on `color-interpolation-filters="sRGB"`.** Without
+  it a colour filter grades the empty margin too and every shape gets a dark
+  halo on a transparent background. It is set on every emitted `<filter>`, and
+  `scripts/filters-parity.ts` fails if a colour filter paints more than 1% of
+  the empty margin.
+- **Heavier stacks degrade.** Above a summed cost weight of 14 the inspector
+  shows a "heavy" badge, and above 22 the preview renders at reduced
+  resolution. Both are heuristics, not guarantees.
 
 ## Randomiser and quality gate
 
@@ -75,8 +117,15 @@ Two rules the SVG backend follows because of this table:
   saturates to white *within the layer*, regardless of the layer's own blend
   mode or opacity. No layer-level budget can predict this without rendering —
   it is exactly what the reject-and-resample gate (`src/lib/quality.ts`) is
-  for. First-try pass rate on the fixed 20-seed set is 14/20; the gate brings
-  the final rate to 20/20 with ~0.35 retries on average.
+  for. The three new generators carry their own guard as well
+  (`generators/density.ts#alphaForLoad`): ribbons, gradient packs and mosaic
+  grids dim per-node opacity as overlap grows, so a dense random roll keeps
+  its shape instead of clipping. First-try pass rate on the fixed 20-seed set
+  was 16/20 at the time the ribbons/gradient/mosaic families landed (final
+  19/20, ~0.15 retries on average); the gate brings the final rate up with
+  reject-and-resample. `bun run scripts/quality20.ts` is the arbiter — the
+  numbers move whenever the generator or modifier pool changes, because every
+  new family redraws all 20 seeds.
 - **The gate measures, it does not understand.** Thresholds (coverage ≥ 3%,
   mean luma ≥ 3, pure white ≤ 30%, penalties for low contrast / low
   content-ground separation / < 16 primitives) are heuristics tuned against the
@@ -88,7 +137,27 @@ Two rules the SVG backend follows because of this table:
   with healthy hue.
 - **A single flare is a valid project.** Flare/hero-ray/single-streak layers
   are exempt from the 16-primitive floor, so a one-object project can pass the
-  gate if it covers enough canvas. Sparse is a penalty, not a rejection.
+  gate if it covers enough canvas. Sparse is a penalty, not a rejection. The
+  same exemption covers `ribbons` (one bundle), `gradShapes` (one shape) and
+  `mosaic` (a grid driven by `cols`/`rows`, not `count`).
+
+## New families and their visual boundaries
+
+- **Neon ribbons** are vector light trails, not photographs of neon: the glow
+  is a tapered gradient outline plus a `plus-lighter` core, blurred sparkles
+  included. SVG fallback is the documented one — `plus-lighter` degrades to
+  `screen` outside browsers, `feGaussianBlur` on the sparkles. A dense roll is
+  deliberately dimmed (`alphaForLoad`) rather than allowed to clip.
+- **Gradient shapes** are flat vector gradients (two stops per shape, linear
+  or radial). Both backends render these natively, so preview and SVG agree
+  with no fallback. They do not do photographic shading: no inner shadows,
+  no scene lighting, no texture — a sphere is a radial highlight, not a 3D
+  render.
+- **Tile mosaic** is opaque flat triangles with a centroid inset for grout —
+  no strokes, no blurs, no blends, so the SVG export is exact. Symmetry is a
+  colour-source fold, not duplicated geometry: the pattern reads as mirrored
+  while the node count stays stable. Photographic stone/paper grain is out of
+  scope; pair with the `grain` generator for that.
 
 ## Layer selection and placement
 

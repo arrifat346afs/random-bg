@@ -2,17 +2,22 @@
  * select.ts — hit-testing and bounds for canvas selection.
  *
  * Two consumers: the selection box drawn over the preview, and click-to-select.
- * Both work from the same `nodeBounds` the blur-clipper already uses, so path
- * geometry is parsed once and memoised rather than per feature.
+ * The box is drawn from `renderBounds` — the same function the renderer sizes
+ * its clip and its offscreen surface from — so the dashed rectangle always
+ * matches the pixels underneath it. When the two came from different bounds the
+ * box sat inside the visible artwork and disagreed with it.
  *
- * Hit-testing is deliberately **bounding-box**, not exact-shape. A glow layer is
- * thousands of mostly-transparent particles; testing real containment would mean
- * parsing thousands of paths on every click, and a click landing in a gap
- * between particles inside a layer's extent still selects that layer — which is
- * what you want when the pixels there are 2% alpha.
+ * Hit-testing stays on the cheaper `contentBounds`, deliberately **bounding
+ * box**, not exact-shape. A glow layer is thousands of mostly-transparent
+ * particles; testing real containment would mean parsing thousands of paths on
+ * every click, and a click landing in a gap between particles inside a layer's
+ * extent still selects that layer — which is what you want when the pixels
+ * there are 2 % alpha.
  */
 
-import { nodeBounds, type Rect } from './render/canvas'
+import { contentBounds } from './render/bounds'
+import { nodesContentBounds, renderBounds } from './render/reach'
+import { activeFilters } from './filters/stack'
 import type { LayerResult } from './pipeline'
 import { layerOffset, type Project } from './schema'
 import type { Node } from './ir'
@@ -26,29 +31,14 @@ import type { Node } from './ir'
  * raw list. Nodes that already carry `tx` (a composed IR) still work, since the
  * two add up.
  */
-export function boundsOfNodes(nodes: Node[], dx = 0, dy = 0): Rect | null {
-  let out: Rect | null = null
-  for (const n of nodes) {
-    const b = nodeBounds(n)
-    if (!b) continue
-    const tx = (n.tx ?? 0) + dx
-    const ty = (n.ty ?? 0) + dy
-    if (!out) {
-      out = { x0: b.x0 + tx, y0: b.y0 + ty, x1: b.x1 + tx, y1: b.y1 + ty }
-      continue
-    }
-    if (b.x0 + tx < out.x0) out.x0 = b.x0 + tx
-    if (b.y0 + ty < out.y0) out.y0 = b.y0 + ty
-    if (b.x1 + tx > out.x1) out.x1 = b.x1 + tx
-    if (b.y1 + ty > out.y1) out.y1 = b.y1 + ty
-  }
-  return out
+export function boundsOfNodes(nodes: Node[], dx = 0, dy = 0): ReturnType<typeof nodesContentBounds> {
+  return nodesContentBounds(nodes, dx, dy)
 }
 
 /** Is (x, y) inside any node's extent? Coordinates are IR/canvas units. */
 export function hitsNodes(nodes: Node[], x: number, y: number, dx = 0, dy = 0): boolean {
   for (const n of nodes) {
-    const b = nodeBounds(n)
+    const b = contentBounds(n)
     if (!b) continue
     const px = x - ((n.tx ?? 0) + dx)
     const py = y - ((n.ty ?? 0) + dy)
@@ -85,18 +75,31 @@ export function hitTestLayers(
 }
 
 /**
- * Bounds of one layer's result, or null when the layer is not in `results` —
- * which is the case for a hidden layer, or one excluded by solo.
+ * Bounds of one layer's **rendered** extent, or null when the layer is not in
+ * `results` — which is the case for a hidden layer, or one excluded by solo.
+ *
+ * This is the rectangle the dashed selection box is drawn from, so it has to be
+ * the renderer's rectangle: content grown by every node's stroke and blur and by
+ * every filter's spread, clamped to the canvas. Passing the layer's stack is what
+ * lets the box enclose a glow that spills past the geometry.
  */
 export function layerBoundsFor(
   results: LayerResult[],
   project: Project,
   layerId: string,
-): Rect | null {
+): ReturnType<typeof renderBounds> {
   const r = results.find((x) => x.layerId === layerId)
   if (!r) return null
   const o = offsetMap(project).get(layerId) ?? { x: 0, y: 0 }
-  return boundsOfNodes(r.ir.nodes, o.x, o.y)
+  const layer = project.layers.find((l) => l.id === layerId)
+  return renderBounds(r.ir.nodes, {
+    filters: layer ? activeFilters(layer) : [],
+    dx: o.x,
+    dy: o.y,
+    width: project.canvas.w,
+    height: project.canvas.h,
+    spreadCtx: { width: project.canvas.w, height: project.canvas.h },
+  })
 }
 
 export { layerOffset }

@@ -1,0 +1,146 @@
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const work = async () => {
+    const [projMod, pipe, exp, cv, fxStack, fxAttach, fxCanvas] = await Promise.all([
+      import('/src/lib/project.ts'),
+      import('/src/lib/pipeline.ts'),
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/canvas.ts'),
+      import('/src/lib/filters/stack.ts'),
+      import('/src/lib/filters/attach.ts'),
+      import('/src/lib/filters/canvas.ts'),
+    ])
+    const { createProject, createLayer, ensureProjectFilters } = projMod
+    const { generateLayer } = pipe
+    const { projectToSvg, compositeLayers } = exp
+    const { renderCanvas } = cv
+    const { createFilter } = fxStack
+    const { projectFilterOpts } = fxAttach
+    const { meanAbsError } = fxCanvas
+
+    const W = 240, H = 180
+
+    /** decode through an ImageBitmap: a bare drawImage leaves a partial frame */
+    const rasterise = async (svg) => {
+      const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
+      const img = new Image()
+      img.src = url
+      await img.decode()
+      const bmp = await createImageBitmap(img)
+      URL.revokeObjectURL(url)
+      const c = document.createElement('canvas')
+      c.width = W; c.height = H
+      const g = c.getContext('2d', { willReadFrequently: true })
+      g.clearRect(0, 0, W, H)
+      g.drawImage(bmp, 0, 0, W, H)
+      return g.getImageData(0, 0, W, H).data
+    }
+
+    const pmError = (a, b) => {
+      let sum = 0
+      const n = a.length / 4
+      for (let i = 0; i < a.length; i += 4) {
+        const aa = a[i + 3] / 255, ab = b[i + 3] / 255
+        for (let k = 0; k < 3; k++) sum += Math.abs(a[i + k] * aa - b[i + k] * ab)
+        sum += Math.abs(a[i + 3] - b[i + 3])
+      }
+      return +(sum / (n * 4)).toFixed(3)
+    }
+
+    const mk = (filters, bypass) => {
+      const p = ensureProjectFilters(createProject({ seed: 777, layers: [] }))
+      p.canvas = { w: W, h: H, bg: { kind: 'transparent' } }
+      p.layers = [createLayer('geometric', 4242, { name: 'browser' })]
+      p.layers[0].filters = filters
+      p.layers[0].filtersBypassed = !!bypass
+      return p
+    }
+
+    // A hand-built subject rather than a generated one: solid fills, hard
+    // edges, no per-node blur. A generated `geometric` layer blurs half its
+    // nodes, and ctx.filter vs feGaussianBlur disagree at every blurred edge —
+    // that alone put the *unfiltered* baseline at ~55/255 and swamped every
+    // measurement.
+    const irMod = await import('/src/lib/ir.ts')
+    const SUBJECT = [
+      irMod.circle(60, 55, 26, { k: 'solid', c: '#e8503a' }),
+      irMod.circle(120, 40, 16, { k: 'solid', c: '#f5c542' }),
+      irMod.path(irMod.polyD([150, 100, 175, 82, 200, 100, 225, 82]), {
+        fill: { k: 'solid', c: '#3aa0d8' },
+      }),
+      irMod.circle(80, 125, 20, { k: 'solid', c: '#7b4fd0' }),
+      irMod.circle(190, 130, 14, { k: 'solid', c: '#3ec98a' }),
+      irMod.circle(210, 55, 12, { k: 'solid', c: '#ffffff' }, { op: 0.55 }),
+    ]
+    const makeResult = (p) => ({
+      ir: irMod.buildIR(W, H, SUBJECT),
+      layerId: p.layers[0].id,
+      truncated: false,
+      key: 'e2e',
+      ms: 0,
+    })
+
+    const F = (type, params) => createFilter(type, params)
+
+    const cases = [
+      ['no filters', [], false],
+      ['colour stack', [F('sepia', { amount: 0.6 }), F('brightness-contrast', { contrast: 0.25 })], false],
+      ['glow stack', [F('outer-glow', { blur: 9, opacity: 0.6 }), F('sharpen', { amount: 0.5 })], false],
+      ['outline', [F('outline', { width: 4, color: '#ffffff' })], false],
+      ['duotone', [F('duotone', {})], false],
+      ['grain', [F('grain', { amount: 0.2, size: 1.4, seed: 3 })], false],
+      ['bypassed', [F('invert'), F('grayscale')], true],
+      ['raster-only', [F('chromatic', { amount: 3 })], false],
+    ]
+
+    const rows = []
+    for (const [label, filters, bypass] of cases) {
+      const p = mk(filters, bypass)
+      const layer = p.layers[0]
+      const res = makeResult(p)
+
+      const cc = document.createElement('canvas')
+      renderCanvas(compositeLayers(p, [res]), cc, {
+        scale: 1,
+        filters: projectFilterOpts(p),
+      })
+      const canvasPx = cc.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data
+
+      const { svg, warnings } = projectToSvg(p, [res], {})
+      const svgPx = await rasterise(svg)
+      const err = pmError(canvasPx, svgPx)
+
+      const images = svg.match(/<image[^>]*>/g) ?? []
+      let imageOk = 'n/a'
+      if (images.length) {
+        // the embedded bitmap must actually decode and carry the pixels
+        const m = images[0].match(/href="([^"]+)"/)
+        imageOk = 'missing href'
+        if (m) {
+          const dataUrl = m[1].replace(/&amp;/g, '&')
+          const img = new Image()
+          img.src = dataUrl
+          await img.decode()
+          imageOk = `${img.naturalWidth}×${img.naturalHeight} decoded`
+        }
+      }
+
+      rows.push({
+        label,
+        err,
+        warnings: warnings.join(' ') || '—',
+        hasFilter: /<filter id="fx-/.test(svg),
+        hasGroup: /<g filter=/.test(svg),
+        hasImage: images.length,
+        imageOk,
+        svgBytes: svg.length,
+      })
+      await sleep(0)
+    }
+
+    return JSON.stringify({ rows }, null, 1)
+  }
+
+  return Promise.race([work(), sleep(120000).then(() => 'TIMEOUT-120s')])
+})()

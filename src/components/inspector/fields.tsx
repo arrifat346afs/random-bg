@@ -27,11 +27,14 @@ export function MiniToggle({
   active,
   onClick,
   label,
+  disabled,
   children,
 }: {
   active?: boolean
   onClick: () => void
   label: string
+  /** greyed out and inert — for move-up on the first entry, etc. */
+  disabled?: boolean
   children: React.ReactNode
 }) {
   return (
@@ -42,6 +45,7 @@ export function MiniToggle({
           variant="ghost"
           aria-label={label}
           aria-pressed={!!active}
+          disabled={disabled}
           onClick={onClick}
           className={`h-6 w-6 ${active ? 'text-primary' : 'text-muted-foreground'}`}
         >

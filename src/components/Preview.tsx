@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo } from 'react'
 import { type IR } from '@/lib/ir'
 import { drawBackground, drawIR } from '@/lib/render/canvas'
 import { composeIR } from '@/lib/pipeline'
+import { projectFilterOpts } from '@/lib/filters/attach'
 import { hitTestLayers, layerBoundsFor } from '@/lib/select'
 import { layerOffset } from '@/lib/schema'
 import { isTyping, isSpaceHeld, setSpaceHeld } from '@/lib/keyboard'
@@ -92,6 +93,13 @@ export function Preview() {
     // artwork visually pinned while the numbers moved underneath.
     return composeIR(project, results)
   }, [results, project])
+
+  /**
+   * Per-layer filter stacks, rebuilt from the project. Derived (not stored) so
+   * editing a filter never touches the render store — only the raster refresh
+   * below, while generation stays cached and instant.
+   */
+  const filterOpts = useMemo(() => projectFilterOpts(project), [project])
 
   /* observe container size */
   useEffect(() => {
@@ -187,7 +195,7 @@ export function Preview() {
         rc.setTransform(1, 0, 0, 1, 0, 0)
         rc.clearRect(0, 0, w, h)
         rc.setTransform(unit, 0, 0, unit, 0, 0)
-        drawIR(rc, ir, 1)
+        drawIR(rc, ir, 1, undefined, filterOpts)
         ui().setRasterMeta({ key: contentKey, unit, ir })
       }
     } else if (unitStale) {
@@ -204,7 +212,7 @@ export function Preview() {
 
     const r = ui().rasterCanvas
     if (r && r.width) ctx.drawImage(r, dx, dy, dw, dh)
-  }, [ir, view, resultsVersion, size.w, size.h, canvas.bg, canvas.w, canvas.h, refine])
+  }, [ir, view, resultsVersion, size.w, size.h, canvas.bg, canvas.w, canvas.h, refine, filterOpts])
 
   // clear the pending sharpen on unmount only — each draw re-arms its own
   useEffect(

@@ -13,6 +13,7 @@ import { getGenerator, fallbackGenerator } from './generators'
 import { layerOffset, type GenContext, type Layer, type Project } from './schema'
 import { effectivePalette, isPaletteLinked } from './palette'
 import { getMaskSampler, identityMask } from './mask'
+import { activeFilters } from './filters/stack'
 
 export const MAX_PRIMITIVES = 40000
 
@@ -49,6 +50,9 @@ export function layerCacheKey(layer: Layer, project: Project, cap = MAX_PRIMITIV
   // geometry; the placement is stamped onto nodes at compose time, so dragging a
   // layer has to keep hitting this cache. Adding `offset` here would regenerate
   // up to 40k primitives on every pointer move.
+  // NB: `layer.filters` / `filtersBypassed` are intentionally absent too. The
+  // filter stack re-applies pixels only (see `filters/cache.ts`) — changing a
+  // filter must never invalidate geometry or re-run generation.
   // Linked layers render from `project.palette`, so it must be part of the
   // memo signature — otherwise editing one layer would leave others cached.
   const paletteSig = isPaletteLinked(layer.color)
@@ -233,7 +237,14 @@ export function activeLayers(project: Project): Layer[] {
  * The single point where offsets enter the render path — the preview and every
  * exporter (PNG/JPG/WebP/SVG/JSON) share it, which is what keeps "what you
  * download is what you saw" true for a moved layer. Nodes at the origin are
- * passed through by reference; only an actually-moved layer pays a copy.
+ * passed through by reference; only an actually-moved or filtered layer pays a
+ * copy.
+ *
+ * `lid` is stamped on nodes of layers with a *live* filter stack (enabled, not
+ * bypassed) so the SVG backend can group them under one `<g filter>` and the
+ * canvas backend can rasterise them separately. Layers with nothing enabled keep
+ * the exact same nodes they had before, so a filter-free project exports
+ * byte-identically.
  */
 export function composeIR(project: Project, results: LayerResult[]): IR {
   const byId = new Map(project.layers.map((l) => [l.id, l]))
@@ -241,11 +252,20 @@ export function composeIR(project: Project, results: LayerResult[]): IR {
   for (const r of results) {
     const layer = byId.get(r.layerId)
     const { x, y } = layer ? layerOffset(layer) : { x: 0, y: 0 }
-    if (x === 0 && y === 0) {
+    // `activeFilters` also filters out unknown types, so a hand-edited or
+    // future-renamed filter can't leave a layer permanently grouped.
+    const filtered = !!layer && activeFilters(layer).length > 0
+    if (x === 0 && y === 0 && !filtered) {
       nodes.push(...r.ir.nodes)
       continue
     }
-    for (const n of r.ir.nodes) nodes.push({ ...n, tx: x, ty: y })
+    const lid = layer?.id
+    for (const n of r.ir.nodes) {
+      const moved = x !== 0 || y !== 0
+      nodes.push(
+        moved ? { ...n, tx: x, ty: y, ...(filtered ? { lid } : {}) } : filtered ? { ...n, lid } : n,
+      )
+    }
   }
   return buildIR(project.canvas.w, project.canvas.h, nodes)
 }

@@ -23,7 +23,8 @@
 import { hexToRgb } from '../palette'
 import type { BlendMode, GradientStop, IR, Node, Paint } from '../ir'
 import { CANVAS_ONLY_BLENDS } from '../ir'
-import type { BackgroundSpec } from '../schema'
+import type { BackgroundSpec, FilterInstance } from '../schema'
+import { compileLayerFilter } from '../filters/svg'
 
 export interface SvgRenderOpts {
   background?: BackgroundSpec
@@ -33,6 +34,21 @@ export interface SvgRenderOpts {
   flattenAdditive?: boolean
   /** omit width/height (viewBox only) */
   viewboxOnly?: boolean
+  /**
+   * Per-layer filter stacks, keyed by layer id. The IR only carries `Node.lid`
+   * (which layer a node belongs to), so the actual params travel separately —
+   * a node's geometry is cached and reused while its filters change.
+   */
+  layerFilters?: Record<string, FilterInstance[]>
+  /**
+   * Pre-rasterised layers, keyed by layer id: `layerId → data URL`.
+   *
+   * A raster-only filter (motion blur, pixelate, chromatic aberration) has no
+   * `<filter>` primitive, so those layers are drawn to a canvas by the caller
+   * and embedded here as an `<image>`. Everything else in the file stays
+   * vector. `renderSVG` itself stays pure — it never touches a canvas.
+   */
+  rasterImages?: Record<string, string>
 }
 
 const esc = (s: string) =>
@@ -133,45 +149,21 @@ const blendCss = (b: BlendMode, flattenAdditive: boolean): string => {
   return b
 }
 
-export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
-  const d = opts.decimals ?? 2
-  const defs = new Map<string, string>()
-  const filters = new Map<string, string>()
-  /** any node relying on the <style> plus-lighter upgrade? */
-  let hasAdditive = false
-
+/**
+ * Render nodes to SVG body strings, sharing `defs`/`filters` maps.
+ * Exported so the per-layer filter compiler can group one layer's nodes
+ * under a single `<g filter>` without duplicating node rendering.
+ */
+export function nodesToSvg(
+  nodes: Node[],
+  d: number,
+  defs: Map<string, string>,
+  filters: Map<string, string>,
+  opts: { flattenAdditive?: boolean } = {},
+): { body: string[]; hasAdditive: boolean } {
   const body: string[] = []
-
-  // background
-  if (opts.background) {
-    const bg = opts.background
-    if (bg.kind === 'solid') {
-      body.push(`<rect width="100%" height="100%" fill="${bg.color}"/>`)
-    } else if (bg.kind === 'gradient') {
-      const id = 'bggrad'
-      defs.set(
-        id,
-        `<linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1" gradientTransform="rotate(${bg.angle - 90} .5 .5)">` +
-          `<stop offset="0" stop-color="${bg.from}"/><stop offset="1" stop-color="${bg.to}"/></linearGradient>`,
-      )
-      body.push(`<rect width="100%" height="100%" fill="url(#${id})"/>`)
-    } else if (bg.kind === 'noise') {
-      body.push(`<rect width="100%" height="100%" fill="${bg.color}"/>`)
-      // Noise backgrounds are raster-only by nature; approximated with a
-      // documented <feTurbulence> overlay.
-      defs.set(
-        'bgturb',
-        `<filter id="bgturb" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">` +
-          `<feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="3" seed="7"/>` +
-          `<feColorMatrix type="saturate" values="0"/></filter>`,
-      )
-      body.push(
-        `<rect width="100%" height="100%" filter="url(#bgturb)" opacity="${Math.min(0.5, bg.amount)}"/>`,
-      )
-    }
-  }
-
-  for (const node of ir.nodes) {
+  let hasAdditive = false
+  for (const node of nodes) {
     const geo = geoSvg(node, d)
     if (!geo) continue
     const attrs: string[] = []
@@ -242,6 +234,83 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
 
     body.push(`${geo} ${attrs.join(' ')}/>`)
   }
+  return { body, hasAdditive }
+}
+
+export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
+  const d = opts.decimals ?? 2
+  const defs = new Map<string, string>()
+  const filters = new Map<string, string>()
+  /** any node relying on the <style> plus-lighter upgrade? */
+  let hasAdditive = false
+
+  const body: string[] = []
+
+  // background
+  if (opts.background) {
+    const bg = opts.background
+    if (bg.kind === 'solid') {
+      body.push(`<rect width="100%" height="100%" fill="${bg.color}"/>`)
+    } else if (bg.kind === 'gradient') {
+      const id = 'bggrad'
+      defs.set(
+        id,
+        `<linearGradient id="${id}" x1="0" y1="0" x2="1" y2="1" gradientTransform="rotate(${bg.angle - 90} .5 .5)">` +
+          `<stop offset="0" stop-color="${bg.from}"/><stop offset="1" stop-color="${bg.to}"/></linearGradient>`,
+      )
+      body.push(`<rect width="100%" height="100%" fill="url(#${id})"/>`)
+    } else if (bg.kind === 'noise') {
+      body.push(`<rect width="100%" height="100%" fill="${bg.color}"/>`)
+      // Noise backgrounds are raster-only by nature; approximated with a
+      // documented <feTurbulence> overlay.
+      defs.set(
+        'bgturb',
+        `<filter id="bgturb" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">` +
+          `<feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="3" seed="7"/>` +
+          `<feColorMatrix type="saturate" values="0"/></filter>`,
+      )
+      body.push(
+        `<rect width="100%" height="100%" filter="url(#bgturb)" opacity="${Math.min(0.5, bg.amount)}"/>`,
+      )
+    }
+  }
+
+  // Nodes arrive grouped by layer: `composeIR` stamps `lid` on every node of a
+  // filtered layer and leaves it off everything else, so a contiguous run with
+  // the same `lid` is exactly one layer's geometry. Each such run becomes a
+  // single `<g filter>` over one chained `<filter>` — Illustrator semantics.
+  for (const run of groupByLayer(ir.nodes)) {
+    // A layer whose stack needs rasterising arrives pre-rendered from
+    // `projectToSvg`; emit it as an <image> rather than silently dropping the
+    // filter on the floor.
+    const dataUrl = run.lid ? opts.rasterImages?.[run.lid] : undefined
+    if (run.lid && dataUrl) {
+      const tx = run.nodes[0]?.tx ?? 0
+      const ty = run.nodes[0]?.ty ?? 0
+      const transform = tx || ty ? ` transform="translate(${fmt(tx, 2)} ${fmt(ty, 2)})"` : ''
+      body.push(
+        `<g${transform}><image href="${esc(dataUrl)}" x="0" y="0" ` +
+          `width="${fmt(ir.w, 2)}" height="${fmt(ir.h, 2)}" ` +
+          `preserveAspectRatio="none"/></g>`,
+      )
+      continue
+    }
+    const { body: runBody, hasAdditive: runAdditive } = nodesToSvg(run.nodes, d, defs, filters, {
+      flattenAdditive: opts.flattenAdditive ?? false,
+    })
+    hasAdditive ||= runAdditive
+    if (!run.lid) {
+      body.push(...runBody)
+      continue
+    }
+    const compiled = compileLayerFilter(run.lid, opts.layerFilters?.[run.lid] ?? [], ir.w, ir.h, run.nodes)
+    if (!compiled) {
+      body.push(...runBody)
+      continue
+    }
+    if (!filters.has(compiled.id)) filters.set(compiled.id, compiled.element)
+    body.push(`<g filter="url(#${compiled.id})">${runBody.join('')}</g>`)
+  }
 
   const allDefs = [...defs.values(), ...filters.values()].join('')
   const wAttr = opts.viewboxOnly ? '' : ` width="${fmt(ir.w, 0)}" height="${fmt(ir.h, 0)}"`
@@ -260,6 +329,27 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
     body.join('') +
     `</g></svg>`
   )
+}
+
+/**
+ * Split a flat node list into contiguous runs. Nodes carrying the same `lid`
+ * group together; a run of unlabelled nodes (every filter-free layer) is kept
+ * whole so the common case still emits one flat body with no wrapper elements.
+ */
+export function groupByLayer(nodes: Node[]): { lid?: string; nodes: Node[] }[] {
+  const runs: { lid?: string; nodes: Node[] }[] = []
+  let cur: { lid?: string; nodes: Node[] } | null = null
+  let curLid: string | undefined
+  for (const n of nodes) {
+    const lid = n.lid
+    if (!cur || lid !== curLid) {
+      cur = { lid, nodes: [] }
+      curLid = lid
+      runs.push(cur)
+    }
+    cur.nodes.push(n)
+  }
+  return runs
 }
 
 /** Does this IR need an SVG capability caveat? Used by the export dialog. */

@@ -35,6 +35,14 @@ export const MODIFIER_DEFS: Record<string, ModifierDef> = {
     secondary: { label: 'Rotational offset', min: 0, max: 1, step: 0.01, default: 0 },
     colorCapable: false,
   },
+  mirror: {
+    type: 'mirror',
+    label: 'Mirror / kaleidoscope',
+    hint: 'Reflect the layer across one axis or both (four-way).',
+    amount: { label: 'Axis angle', min: 0, max: 180, step: 1, default: 0 },
+    secondary: { label: 'Planes (1 = one axis, 2 = four-way)', min: 1, max: 2, step: 1, default: 1 },
+    colorCapable: false,
+  },
   array: {
     type: 'array',
     label: 'Repeat / array',
@@ -416,6 +424,44 @@ function applyOne(nodes: Node[], m: ModifierSpec, ctx: ModContext): Node[] {
           })
           out.push({ ...node, g })
         }
+      }
+      return out
+    }
+
+    case 'mirror': {
+      const ang = (m.amount * Math.PI) / 180
+      const ux = Math.cos(ang)
+      const uy = Math.sin(ang)
+      const twoWay = Math.round(m.secondary) >= 2
+      // reflect across the axis through the centre: decompose into
+      // parallel + perpendicular parts, then flip the perpendicular one
+      const reflect = (x: number, y: number): [number, number] => {
+        const dx = x - cx
+        const dy = y - cy
+        const par = dx * ux + dy * uy
+        const px = par * ux
+        const py = par * uy
+        const qx = dx - px
+        const qy = dy - py
+        return [cx + px - qx, cy + py - qy]
+      }
+      const out: Node[] = []
+      for (const node of nodes) out.push(node)
+      for (const node of nodes) out.push({ ...node, g: mapGeo(node.g, reflect) })
+      if (twoWay) {
+        // second axis is perpendicular to the first: four-way symmetry
+        const vx = -uy
+        const vy = ux
+        const reflect2 = (x: number, y: number): [number, number] => {
+          const dx = x - cx
+          const dy = y - cy
+          const par = dx * vx + dy * vy
+          const px = par * vx
+          const py = par * vy
+          return [cx + px - (dx - px), cy + py - (dy - py)]
+        }
+        const first = out.slice()
+        for (const node of first) out.push({ ...node, g: mapGeo(node.g, reflect2) })
       }
       return out
     }

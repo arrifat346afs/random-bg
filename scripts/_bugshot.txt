@@ -1,0 +1,44 @@
+/**
+ * scripts/_bugshot.txt — renders the pinned bug case to a PNG data URL so
+ * scripts/bounds-e2e.ts (and a human) can look at it before/after a change.
+ * The expression returns the data URL; the caller decodes and writes the file.
+ */
+(async () => {
+  const { drawIR } = await import('/src/lib/render/canvas.ts')
+  const { makeFilter } = await import('/src/lib/filters/stack.ts')
+  const W = 900
+  const H = 600
+  const BG = { kind: 'gradient', from: '#0a0a12', to: '#1b1024', angle: 90 }
+  const SHARDS = [
+    { cx: 250, cy: 300, len: 520, wid: 200, rot: 0.35, c: '#ff5fa2' },
+    { cx: 660, cy: 300, len: 520, wid: 200, rot: 2.1, c: '#ffffff' },
+  ]
+  const nodes = SHARDS.map((s) => {
+    const c = Math.cos(s.rot)
+    const sn = Math.sin(s.rot)
+    const P = (x, y) => [s.cx + x * c - y * sn, s.cy + x * sn + y * c]
+    const a = P(0, -s.len)
+    const b = P(s.wid, 0)
+    const d = P(0, s.len * 0.75)
+    const e = P(-s.wid, 0)
+    return {
+      g: { k: 'poly', pts: [a[0], a[1], b[0], b[1], d[0], d[1], e[0], e[1]] },
+      fill: { k: 'solid', c: s.c },
+      op: 0.9,
+      blend: 'plus-lighter',
+      blur: 10,
+      lid: 'L1',
+    }
+  })
+  const c = document.createElement('canvas')
+  c.width = W
+  c.height = H
+  drawIR(
+    c.getContext('2d'),
+    { w: W, h: H, stats: {}, nodes },
+    1,
+    BG,
+    { layerFilters: { L1: [makeFilter('gaussian-blur', { sigmaX: 6, sigmaY: 6 })] } },
+  )
+  return c.toDataURL('image/png')
+})()

@@ -9,9 +9,11 @@
 
 import { createRng, hash32, type RNG } from './rng'
 import { generatePalette, hexToRgb, PRESET_PALETTES, PALETTE_KEYS, type Harmony, type Palette } from './palette'
-import { GENERATORS, getGenerator, minCountFor } from './generators'
+import { GENERATORS, getGenerator, minCountFor, FAMILY_WEIGHTS } from './generators'
 import { createLayer, duplicateLayer, newId } from './project'
 import { defaultModifier } from './modifiers'
+import { randomFilterStack, resampleFilterStack } from './filters/random'
+import { ensureFilters } from './filters/stack'
 import { DIST_OPTIONS, defaultDist, type DistSpec, type Layer, type ModifierSpec, type Params, type Project, type ModType, type ParamDef, type ParamValue } from './schema'
 import type { BlendMode } from './ir'
 
@@ -32,6 +34,15 @@ const DIST_WEIGHTS: Record<string, Partial<Record<DistSpec['type'], number>>> = 
   smoke: { uniform: 3, gaussian: 4, clustered: 3.5, radial: 2, noiseMask: 2, poisson: 2 },
   geometric: { uniform: 6 },
   grain: { uniform: 6 },
+  // ribbons anchor on samples then draw long curves — clustered / curve /
+  // sineBand give them somewhere to go; uniform still fine for sweeps
+  ribbons: { curve: 3, sineBand: 2.5, clustered: 2.5, uniform: 2.5, gaussian: 2, radial: 2, spiral: 1.5 },
+  // gradient shapes place their own slots; the dist only seeds anchors —
+  // keep it calm so stacks and columns stay coherent
+  gradShapes: { uniform: 4, gaussian: 3, clustered: 2 },
+  // mosaic covers the whole grid itself; the dist only seeds ribbon-style
+  // anchors, so any choice behaves the same — uniform keeps it cheap
+  mosaic: { uniform: 6 },
 }
 
 /** Blend modes that consistently look good as a layer blend. */
@@ -300,10 +311,11 @@ const MOD_CHANCE = 0.42
 function randomMods(genId: string, rng: RNG): ModifierSpec[] {
   if (rng.next() > 0.72) return []
   const mods: ModifierSpec[] = []
-  const candidates: ModType[] = ['noise', 'twist', 'kaleido', 'array', 'scaleByPos', 'colorByPos', 'axisFade', 'jitter']
-  // geometry generators love kaleidoscope; particle layers love jitter
+  const candidates: ModType[] = ['noise', 'twist', 'kaleido', 'mirror', 'array', 'scaleByPos', 'colorByPos', 'axisFade', 'jitter']
+  // geometry generators love symmetry; particle layers love jitter
   const bias =
-    genId === 'geometric' ? ['kaleido', 'twist', 'array'] :
+    genId === 'geometric' || genId === 'gradShapes' || genId === 'mosaic' ? ['kaleido', 'mirror', 'twist', 'array'] :
+    genId === 'ribbons' ? ['twist', 'mirror', 'colorByPos', 'axisFade'] :
     genId === 'grain' ? [] :
     ['noise', 'jitter', 'axisFade', 'colorByPos']
   const n = rng.next() < 0.25 ? 2 : 1
@@ -339,7 +351,8 @@ export function randomLayer(opts: LayerSampleOpts): Layer {
   const genId = opts.genId ?? pickGenerator(rng)
   const gen = getGenerator(genId)
   const palette = opts.palette ?? generatePalette(rng)
-  const layer = createLayer(genId, Math.floor(rng.next() * 1e9), {
+  const layerSeed = Math.floor(rng.next() * 1e9)
+  const layer = createLayer(genId, layerSeed, {
     name: gen?.name ?? genId,
   })
 
@@ -365,12 +378,25 @@ export function randomLayer(opts: LayerSampleOpts): Layer {
     invert: rng.next() < 0.2,
     linked: true,
   }
+  // 0–2 tasteful filters, drawn from a deliberately short safe list (grain, a
+  // slight blur, a soft glow, small colour grades) — see `filters/random.ts`.
+  // Without these a random project is a bit flat; with anything broader it stops
+  // being good work.
+  //
+  // Forked off the layer seed rather than drawn from `rng`: the filter stack is a
+  // *post-process*, so it must not steal draws from the stream that makes the
+  // artwork. Drawing here inline silently re-rolled every shape, palette and
+  // canvas size for every existing seed the first time filters landed.
+  layer.filters = randomFilterStack(rng.fork('filters', layerSeed))
+  layer.filtersBypassed = false
   return layer
 }
 
 export function pickGenerator(rng: RNG): string {
-  const families = ['particles', 'light', 'atmosphere', 'geometry', 'texture']
-  const weights = [4, 3, 2.4, 2, 1.4]
+  // read the registry weights so adding a family or re-weighting one place
+  // updates every roll; previously this hardcoded a copy of the table
+  const families = FAMILY_WEIGHTS.map(([f]) => f)
+  const weights = FAMILY_WEIGHTS.map(([, w]) => w)
   const family = rng.weighted(families, weights)
   const pool = GENERATORS.filter((g) => g.family === family)
   return (pool.length ? rng.pick(pool) : rng.pick(GENERATORS)).id
@@ -570,6 +596,16 @@ export function mutateLayer(layer: Layer, rng: RNG, strength = 0.15): Layer {
   if (rng.next() < strength * 0.5) {
     next.mods = mutateMods(layer.mods, rng, strength)
   }
+  // Filters are re-sampled, not rebuilt: an evolve walk nudges magnitudes
+  // inside each filter's safe range rather than wiping a deliberate stack.
+  // Locked layers keep theirs untouched. Forked, so the guard draw and the
+  // re-sample never shift the rest of the walk.
+  if (!layer.locked) {
+    const filterRng = rng.fork('filters', layer.seedOffset, layer.gen)
+    if (filterRng.next() < strength) {
+      next.filters = resampleFilterStack(ensureFilters(layer), filterRng, strength)
+    }
+  }
   next.seedOffset = layer.seedOffset + (rng.next() < strength ? rng.int(1, 97) : 0)
   fitDensity(layer.gen, next.params, 9000)
   return next
@@ -598,7 +634,7 @@ function mutateMods(mods: ModifierSpec[], rng: RNG, strength: number): ModifierS
   const next = mods.map((m) => ({ ...m }))
   if (next.length === 0 || rng.next() < 0.35) {
     if (rng.next() < 0.6) {
-      const type = rng.pick(['noise', 'twist', 'kaleido', 'array', 'scaleByPos', 'colorByPos', 'axisFade', 'jitter'] as ModType[])
+      const type = rng.pick(['noise', 'twist', 'kaleido', 'mirror', 'array', 'scaleByPos', 'colorByPos', 'axisFade', 'jitter'] as ModType[])
       if (!next.some((m) => m.type === type)) next.push(defaultModifier(type))
     }
   }

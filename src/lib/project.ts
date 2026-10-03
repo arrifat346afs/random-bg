@@ -75,6 +75,8 @@ export function createLayer(genId: string, seed: number, overrides: Partial<Laye
     salt,
     locks: {},
     groupId: null,
+    filters: [],
+    filtersBypassed: false,
     // undefined-valued overrides are dropped above so they don't wipe defaults
     ...clean,
   }
@@ -218,6 +220,20 @@ export function createGroup(name = 'Group'): LayerGroup {
 export function addModifier(layer: Layer, type: ModifierSpec['type']): Layer {
   if (layer.mods.some((m) => m.type === type)) return layer
   return { ...layer, mods: [...layer.mods, defaultModifier(type)] }
+}
+
+/**
+ * Fill filter defaults for projects saved before filters existed.
+ * Mutates missing fields in place (like `ensurePaletteLinks`) and returns
+ * the same project, so old JSON and presets load unchanged.
+ */
+export function ensureProjectFilters(p: Project): Project {
+  for (const l of p.layers) {
+    if (!Array.isArray(l.filters)) l.filters = []
+    if (typeof l.filtersBypassed !== 'boolean') l.filtersBypassed = false
+  }
+  if (!Array.isArray(p.masterFilters)) p.masterFilters = []
+  return p
 }
 
 /* ---- Preset-ish helpers ------------------------------------------------- */

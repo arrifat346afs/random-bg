@@ -73,7 +73,7 @@ function initialTheme(): ViewState['theme'] {
   return 'system'
 }
 
-export type InspectorTab = 'params' | 'distribute' | 'colour' | 'effects'
+export type InspectorTab = 'params' | 'distribute' | 'colour' | 'effects' | 'filters'
 
 /** Which mobile sheet: the layer stack or the inspector. */
 export type SheetSide = 'left' | 'right'
@@ -209,6 +209,10 @@ export interface UiStore {
   renameDraft: string
   /** "add modifier" popover open in the Effects tab */
   modifierPickerOpen: boolean
+  /** "add filter" menu open in the Filters tab */
+  filterPickerOpen: boolean
+  /** live query in the filter picker search box */
+  filterQuery: string
 
   /**
    * Per-field drafts for numeric inputs, keyed by `${layerId}:${paramKey}`.
@@ -285,6 +289,10 @@ export interface UiStore {
   setRenamingLayer: (renaming: boolean, draft?: string) => void
   setRenameDraft: (draft: string) => void
   setModifierPickerOpen: (open: boolean) => void
+  /** open/close the Filters tab's "add filter" menu (closing clears the query) */
+  setFilterPickerOpen: (open: boolean) => void
+  /** live query driving the filter picker's search box */
+  setFilterQuery: (query: string) => void
   setParamDraft: (key: string, draft: string) => void
   markParamDrift: (key: string, value: number) => void
   clearParamDraft: (key: string) => void
@@ -355,6 +363,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   renamingLayer: false,
   renameDraft: '',
   modifierPickerOpen: false,
+  filterPickerOpen: false,
+  filterQuery: '',
 
   paramDrafts: {},
   paramDrifts: {},
@@ -489,6 +499,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
 
   setRenameDraft: (renameDraft) => set({ renameDraft }),
   setModifierPickerOpen: (modifierPickerOpen) => set({ modifierPickerOpen }),
+  setFilterPickerOpen: (filterPickerOpen) => set({ filterPickerOpen, filterQuery: '' }),
+  setFilterQuery: (filterQuery) => set({ filterQuery }),
   /** Unchanged value is a no-op: this is called during render. */
   markParamDrift: (key, value) =>
     set((s) => (Object.is(s.paramDrifts[key], value) ? s : { paramDrifts: { ...s.paramDrifts, [key]: value } })),
