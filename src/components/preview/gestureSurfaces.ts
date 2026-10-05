@@ -24,6 +24,7 @@ import { activeFilters } from '@/lib/filters/stack'
 import type { FilterInstance } from '@/lib/filters/types'
 import { pivotOf } from '@/lib/transform'
 import { nodesContentBounds } from '@/lib/render/reach'
+import { selfSnapshotBounds, snapshotPixelSize } from '@/lib/gesturePlacement'
 import type { Layer, Project } from '@/lib/schema'
 
 /**
@@ -55,6 +56,10 @@ export interface GestureSurfaces {
   pivot: { x: number; y: number }
   blend: GlobalCompositeOperation
   opacity: number
+  /** canvas-units origin of the `self` snapshot (unclamped render bounds) */
+  selfOrigin: { x: number; y: number }
+  /** canvas-units size of the `self` snapshot */
+  selfSize: { w: number; h: number }
 }
 
 const cache = new Map<string, GestureSurfaces>()
@@ -135,7 +140,14 @@ export function buildSurfaces(
       ? selfResult.ir.nodes.map((n) => ({ ...n, lid: layer.id }))
       : selfResult.ir.nodes,
   )
-  const self = paint(w, h, unit, selfIR, layer.id, filters)
+  // The self snapshot covers the layer's untransformed render bounds —
+  // unclamped — so overflow outside the canvas survives the gesture. `below`
+  // stays canvas-sized: it is already in canvas space.
+  const bounds = selfSnapshotBounds(selfResult.ir.nodes, filters, ir.w, ir.h)
+  const origin = { x: bounds.x0, y: bounds.y0 }
+  const size = { w: bounds.x1 - bounds.x0, h: bounds.y1 - bounds.y0 }
+  const px = snapshotPixelSize(bounds, unit)
+  const self = paintWithOrigin(px.w, px.h, unit, origin, selfIR, layer.id, filters)
   if (!below || !self) return null
   return {
     forUnit,
@@ -144,6 +156,8 @@ export function buildSurfaces(
     pivot: pivotOf(nodesContentBounds(selfResult.ir.nodes)),
     blend: canvasBlend(layer.blend),
     opacity: layer.opacity,
+    selfOrigin: origin,
+    selfSize: size,
   }
 }
 
@@ -156,12 +170,25 @@ function paint(
   lid?: string,
   filters?: FilterInstance[],
 ): HTMLCanvasElement | null {
+  return paintWithOrigin(w, h, unit, { x: 0, y: 0 }, ir, lid, filters)
+}
+
+/** Rasterise the canvas-units rect at `origin` into a fresh canvas. */
+function paintWithOrigin(
+  w: number,
+  h: number,
+  unit: number,
+  origin: { x: number; y: number },
+  ir: IR,
+  lid?: string,
+  filters?: FilterInstance[],
+): HTMLCanvasElement | null {
   const c = document.createElement('canvas')
   c.width = w
   c.height = h
   const ctx = c.getContext('2d')
   if (!ctx) return null
-  ctx.setTransform(unit, 0, 0, unit, 0, 0)
+  ctx.setTransform(unit, 0, 0, unit, -origin.x * unit, -origin.y * unit)
   drawIR(ctx, ir, 1, undefined, lid && filters ? { layerFilters: { [lid]: filters } } : undefined)
   return c
 }

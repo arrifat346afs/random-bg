@@ -20,7 +20,8 @@ import { useEffect, useRef } from 'react'
 import { drawBackground, drawIR, type FilterRenderOpts } from '@/lib/render/canvas'
 import type { IR } from '@/lib/ir'
 import type { LayerResult } from '@/lib/pipeline'
-import { transformMatrix } from '@/lib/transform'
+import { gestureSelfMatrix } from '@/lib/gesturePlacement'
+import type { LayerTransform } from '@/lib/transform'
 import { useUiStore } from '@/store/uiStore'
 import { useProjectStore } from '@/store/projectStore'
 import { useRenderStore } from '@/store/renderStore'
@@ -184,26 +185,32 @@ function drawGesture(
   const snap = drag.current
   if (!snap) return
 
-  const place = (img: HTMLCanvasElement, m?: ReturnType<typeof transformMatrix>) => {
+  const place = (
+    img: HTMLCanvasElement,
+    dest: { x: number; y: number; w: number; h: number },
+    m?: { a: number; b: number; c: number; d: number; e: number; f: number },
+  ) => {
     ctx.save()
+    // The pivot is already folded into m.e,m.f — apply the matrix once.
     ctx.setTransform(view.scale, 0, 0, view.scale, view.ox, view.oy)
-    if (m) {
-      ctx.translate(m.e, m.f)
-      ctx.transform(m.a, m.b, m.c, m.d, 0, 0)
-      ctx.translate(-snap.pivot.x, -snap.pivot.y)
-    }
-    ctx.drawImage(img, 0, 0, ir.w, ir.h)
+    if (m) ctx.transform(m.a, m.b, m.c, m.d, m.e, m.f)
+    ctx.drawImage(img, dest.x, dest.y, dest.w, dest.h)
     ctx.restore()
   }
 
   // `below` is already in canvas space — `composeIR` stamped every other layer's
   // own placement — so it blits straight through the view transform.
-  place(snap.below)
+  place(snap.below, { x: 0, y: 0, w: ir.w, h: ir.h })
   // `self` carries the layer's blend and opacity, applied here rather than baked
   // in, so the gesture composites exactly as the committed render will.
   ctx.save()
   ctx.globalCompositeOperation = snap.blend
   ctx.globalAlpha = snap.opacity
-  place(snap.self, transformMatrix(live.transform, snap.pivot))
+  const liveTransform: LayerTransform = live.transform
+  place(
+    snap.self,
+    { x: snap.selfOrigin.x, y: snap.selfOrigin.y, w: snap.selfSize.w, h: snap.selfSize.h },
+    gestureSelfMatrix(liveTransform, snap.pivot),
+  )
   ctx.restore()
 }
