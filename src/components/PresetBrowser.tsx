@@ -17,6 +17,7 @@ import { Save, Search, Sparkles, Trash2 } from 'lucide-react'
 import { Empty } from './preset-browser/Empty'
 import { ImportPresetsButton } from './preset-browser/ImportPresetsButton'
 import { PresetCard } from './preset-browser/PresetCard'
+import { PresetThumbnail } from './preset-browser/PresetThumbnail'
 import { useUiStore } from '@/store/uiStore'
 import { useProjectStore } from '@/store/projectStore'
 
@@ -136,32 +137,35 @@ export function PresetBrowser({ open, onOpenChange }: Props) {
                   {userPresets.map((p) => (
                     <div
                       key={p.id}
-                      className="group flex items-start gap-2 rounded-lg border p-3 transition-colors hover:border-primary/50"
+                      className="group flex flex-col gap-2 rounded-lg border p-3 transition-colors hover:border-primary/50"
                     >
                       <button
-                        className="min-w-0 flex-1 text-left"
+                        className="block w-full text-left"
                         onClick={() => {
                           useProjectStore.getState().applyProject(structuredClone(p.project))
                           onOpenChange(false)
                         }}
                       >
-                        <span className="block truncate text-sm font-semibold">{p.name}</span>
-                        <span className="mt-1 flex flex-wrap gap-1">
+                        <PresetThumbnail project={p.project} label={p.name} />
+                        <span className="mt-2 block truncate text-sm font-semibold">{p.name}</span>
+                      </button>
+                      <span className="flex items-start justify-between gap-2">
+                        <span className="flex min-w-0 flex-wrap gap-1">
                           {p.tags.map((t) => (
                             <Badge key={t} variant="muted">
                               {t}
                             </Badge>
                           ))}
                         </span>
-                      </button>
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        aria-label="Delete saved preset"
-                        onClick={() => useLibraryStore.getState().deleteUserPreset(p.id)}
-                      >
-                        <Trash2 />
-                      </Button>
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          aria-label="Delete saved preset"
+                          onClick={() => useLibraryStore.getState().deleteUserPreset(p.id)}
+                        >
+                          <Trash2 />
+                        </Button>
+                      </span>
                     </div>
                   ))}
                 </div>

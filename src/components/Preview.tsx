@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo } from 'react'
 import { type IR } from '@/lib/ir'
-import { composeIR } from '@/lib/pipeline'
+import { composeStageIR } from '@/lib/stageIR'
 import type { HandleId } from '@/lib/handles'
 import { projectFilterOpts } from '@/lib/filters/attach'
 import { isSpaceHeld, setSpaceHeld } from '@/lib/keyboard'
@@ -47,17 +47,24 @@ export function Preview() {
   /**
    * The layer list, and nothing else, from the project.
    *
-   * `composeIR` and the filter map both depend on layer content, and any edit
-   * replaces the edited layer's object (and the array), so this is the right
-   * granularity: narrow enough that a placement change does *not* re-render the
-   * stage, which is what stops a drag from cascading into the draw effect.
+   * `composeStageIR` and the filter map both depend on layer content, and any
+   * edit replaces the edited layer's object (and the array), so this is the
+   * right granularity: a committed placement recomposes the IR (cheap stamping,
+   * no regeneration), while a running gesture writes only `liveTransform` and
+   * never touches `project.layers`, so nothing recomposes per frame.
    */
   const layers = useProjectStore((s) => s.project.layers)
 
   const ir: IR | null = useMemo(() => {
     if (!results) return null
-    return composeIR(useProjectStore.getState().project, results)
-  }, [results])
+    // `layers` (+ canvas dims) is the invalidation signal: a committed
+    // transform/visibility/filter/canvas edit replaces the array (or dims)
+    // without regenerating `results`, and the memo must still recompose.
+    void layers
+    void canvasSpec.w
+    void canvasSpec.h
+    return composeStageIR(useProjectStore.getState().project, results)
+  }, [results, layers, canvasSpec.w, canvasSpec.h])
 
   /**
    * Per-layer filter stacks, rebuilt from the project. Derived (not stored) so
