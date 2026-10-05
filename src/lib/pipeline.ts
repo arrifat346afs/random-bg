@@ -8,12 +8,14 @@
 
 import { createRng, hash32 } from './rng'
 import { applyModifiers } from './modifiers'
-import { buildIR, type IR, type Node } from './ir'
+import { buildIR, type IR, type Node, type TransformStamp } from './ir'
 import { getGenerator, fallbackGenerator } from './generators'
-import { layerOffset, type GenContext, type Layer, type Project } from './schema'
+import { layerTransformOf, type GenContext, type Layer, type Project } from './schema'
+import { pivotOf } from './transform'
 import { effectivePalette, isPaletteLinked } from './palette'
 import { getMaskSampler, identityMask } from './mask'
 import { activeFilters } from './filters/stack'
+import { nodesContentBounds } from './render/reach'
 
 export const MAX_PRIMITIVES = 40000
 
@@ -232,13 +234,16 @@ export function activeLayers(project: Project): Layer[] {
 
 /**
  * Flatten per-layer IRs into one canvas IR, stamping each node with its layer's
- * manual placement (`Layer.offset`).
+ * placement.
  *
- * The single point where offsets enter the render path — the preview and every
- * exporter (PNG/JPG/WebP/SVG/JSON) share it, which is what keeps "what you
- * download is what you saw" true for a moved layer. Nodes at the origin are
- * passed through by reference; only an actually-moved or filtered layer pays a
- * copy.
+ * The single point where `Layer.transform` enters the render path — the preview
+ * and every exporter (PNG/JPG/WebP/SVG/JSON) share it, which is what keeps "what
+ * you download is what you saw" true for a moved, scaled or rotated layer.
+ *
+ * Translation rides on `Node.tx/ty` and scale/rotation on a single shared
+ * `Node.tr`, so a layer with no transform keeps its nodes **by reference** and
+ * its IR is byte-identical to what it was before transforms existed. Only an
+ * actually-placed layer pays a copy.
  *
  * `lid` is stamped on nodes of layers with a *live* filter stack (enabled, not
  * bypassed) so the SVG backend can group them under one `<g filter>` and the
@@ -251,23 +256,68 @@ export function composeIR(project: Project, results: LayerResult[]): IR {
   const nodes: Node[] = []
   for (const r of results) {
     const layer = byId.get(r.layerId)
-    const { x, y } = layer ? layerOffset(layer) : { x: 0, y: 0 }
     // `activeFilters` also filters out unknown types, so a hand-edited or
     // future-renamed filter can't leave a layer permanently grouped.
     const filtered = !!layer && activeFilters(layer).length > 0
-    if (x === 0 && y === 0 && !filtered) {
-      nodes.push(...r.ir.nodes)
+    const place = layer ? placementStamp(layer, r.ir) : null
+    if (!place) {
+      if (!filtered) {
+        nodes.push(...r.ir.nodes)
+        continue
+      }
+      const onlyId = layer?.id
+      for (const n of r.ir.nodes) nodes.push({ ...n, lid: onlyId })
       continue
     }
     const lid = layer?.id
+    const { tr } = place
     for (const n of r.ir.nodes) {
-      const moved = x !== 0 || y !== 0
-      nodes.push(
-        moved ? { ...n, tx: x, ty: y, ...(filtered ? { lid } : {}) } : filtered ? { ...n, lid } : n,
-      )
+      nodes.push({
+        ...n,
+        tx: place.x,
+        ty: place.y,
+        ...(tr ? { tr } : {}),
+        ...(filtered ? { lid } : {}),
+      })
     }
   }
   return buildIR(project.canvas.w, project.canvas.h, nodes)
+}
+
+/** What `composeIR` stamps on a layer, or null when it needs no stamping. */
+interface Placement {
+  x: number
+  y: number
+  /** one frozen object shared by every node of the layer */
+  tr: TransformStamp | null
+}
+
+/**
+ * A layer's placement with its pivot resolved.
+ *
+ * The pivot defaults to the centre of the layer's **untransformed** geometry
+ * bounds, so scaling and rotating act about where the artwork is rather than
+ * about the canvas origin. Bounds come from the layer's own cached IR, so this
+ * never re-measures geometry that a move did not touch.
+ */
+function placementStamp(layer: Layer, ir: IR): Placement | null {
+  const t = layerTransformOf(layer)
+  const moved = t.x !== 0 || t.y !== 0
+  const shaped = t.scaleX !== 1 || t.scaleY !== 1 || t.rotation !== 0
+  if (!moved && !shaped) return null
+  if (!shaped) return { x: t.x, y: t.y, tr: null }
+  const pivot = pivotOf(nodesContentBounds(ir.nodes))
+  return {
+    x: t.x,
+    y: t.y,
+    tr: Object.freeze({
+      scaleX: t.scaleX,
+      scaleY: t.scaleY,
+      rotation: t.rotation,
+      px: pivot.x,
+      py: pivot.y,
+    }),
+  }
 }
 
 export interface ProjectProgress {

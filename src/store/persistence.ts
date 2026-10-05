@@ -16,12 +16,30 @@ export const KEYS = {
 } as const
 
 export function loadJSON<T>(key: string): T | null {
+  const raw = loadRaw(key)
+  if (!raw) return null
   try {
-    const raw = localStorage.getItem(key)
-    if (!raw) return null
     return JSON.parse(raw) as T
   } catch {
     return null
+  }
+}
+
+/** Raw read — null when missing *or* unreadable, never throws. */
+export function loadRaw(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+/** Best-effort backup of an unreadable blob so a fallback never destroys work. */
+export function backupRaw(key: string, raw: string): void {
+  try {
+    localStorage.setItem(`${key}:corrupt:${Date.now().toString(36)}`, raw)
+  } catch {
+    /* quota/blocked — nothing more we can do */
   }
 }
 

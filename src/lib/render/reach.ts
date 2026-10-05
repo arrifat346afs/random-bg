@@ -115,16 +115,22 @@ export interface RenderBoundsOpts {
  * node's own stroke and blur, by every filter in the stack, then clamped to the
  * canvas — and to nothing else, ever.
  *
+ * The two spreads are **summed, not maximised**, and that matters. A node's own
+ * blur is applied *inside* the offscreen surface, so its reach has to fit within
+ * it; the filter stack is applied to the finished surface, so its reach lands
+ * *outside*. Taking the larger of the two instead of the sum is how a blurred
+ * layer with a displacing filter loses a few pixels at the edge.
+ *
  * Returns null only when no node's extent is determinable.
  */
 export function renderBounds(nodes: readonly Node[], opts: RenderBoundsOpts = {}): Rect | null {
   const content = nodesContentBounds(nodes, opts.dx ?? 0, opts.dy ?? 0)
   if (!content) return null
-  let spread = maxNodeSpread(nodes)
-  const fs = opts.filters
+  const node = maxNodeSpread(nodes)
+  const stack = opts.filters
     ? stackSpread(opts.filters, opts.spreadCtx ?? { width: 0, height: 0 })
     : 0
-  if (Number.isFinite(fs) && fs > spread) spread = fs
+  const spread = node + (Number.isFinite(stack) ? stack : 0)
   const out = padRect(content, spread)
   if (opts.width === undefined || opts.height === undefined) return out
   return clampToCanvas(out, opts.width, opts.height)

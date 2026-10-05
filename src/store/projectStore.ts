@@ -15,7 +15,7 @@
 
 import { create } from 'zustand'
 import { cloneProject } from '../lib/project'
-import { layerOffset, type Layer, type Project } from '../lib/schema'
+import { layerTransformOf, type Layer, type Project } from '../lib/schema'
 import {
   nextCursor,
   pushPast,
@@ -26,11 +26,12 @@ import {
   type CommitPolicy,
   type HistoryCursor,
 } from './history'
-import { KEYS, loadJSON, saveJSON } from './persistence'
+import { KEYS, backupRaw, loadRaw, saveJSON } from './persistence'
 import { useRenderStore } from './renderStore'
 import { useUiStore } from './uiStore'
 import { getPreset } from '../lib/presets'
 import { createProject, ensurePaletteLinks, ensureProjectFilters } from '../lib/project'
+import { migrateLayers } from '../lib/migrate'
 
 /** Store-facing commit options: the history policy plus a selection change. */
 export interface CommitOpts extends CommitPolicy {
@@ -38,17 +39,36 @@ export interface CommitOpts extends CommitPolicy {
   select?: string | null
 }
 
+function fallbackProject(): Project {
+  const preset = getPreset('gold-dust') ?? createProject({ layers: ['particles', 'bokeh'] })
+  ensureProjectFilters(preset)
+  return ensurePaletteLinks(preset)
+}
+
 function loadInitialProject(): Project {
-  const saved = loadJSON<Project>(KEYS.project)
+  let raw: string | null = null
+  try {
+    raw = loadRaw(KEYS.project)
+  } catch {
+    return fallbackProject()
+  }
+  if (!raw) return fallbackProject()
+  let saved: Project | null = null
+  try {
+    saved = JSON.parse(raw) as Project
+  } catch {
+    backupRaw(KEYS.project, raw)
+    return fallbackProject()
+  }
   if (saved && saved.v === 1 && Array.isArray(saved.layers)) {
     // validate that referenced generators still exist at use-time
     if (!saved.palette) saved.palette = { colors: ['#ffffff', '#000000'] }
     ensureProjectFilters(saved)
-    return ensurePaletteLinks(saved)
+    // `offset` -> `transform`: projects on disk may predate or postdate the field
+    return migrateLayers(ensurePaletteLinks(saved))
   }
-  const preset = getPreset('gold-dust') ?? createProject({ layers: ['particles', 'bokeh'] })
-  ensureProjectFilters(preset)
-  return ensurePaletteLinks(preset)
+  backupRaw(KEYS.project, raw)
+  return fallbackProject()
 }
 
 const NO_CURSOR: HistoryCursor = { key: null, at: 0 }
@@ -57,19 +77,69 @@ const NO_CURSOR: HistoryCursor = { key: null, at: 0 }
 let lastCoalesce: HistoryCursor = NO_CURSOR
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null
+let pendingProject: Project | null = null
+let flushHooked = false
 /**
  * Autosave, debounced.
  *
  * Commits fire on every keystroke of a slider drag, and `localStorage` writes
  * synchronously block the main thread, so the write is coalesced.
+ *
+ * The pending project is also flushed on pagehide / hidden tab, otherwise a
+ * fast close inside the 700ms window silently drops the last edits.
  */
 function scheduleAutosave(project: Project): void {
+  pendingProject = project
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => {
+    saveTimer = null
+    pendingProject = null
     const ok = saveJSON(KEYS.project, project)
     useUiStore.getState().reportStorage(ok)
   }, 700)
 }
+
+/** Write any pending autosave now. Safe to call when nothing is pending. */
+export function flushAutosave(): boolean {
+  if (!pendingProject && !saveTimer) return true
+  const next = pendingProject
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  pendingProject = null
+  if (!next) return true
+  const ok = saveJSON(KEYS.project, next)
+  try {
+    useUiStore.getState().reportStorage(ok)
+  } catch {
+    /* store may be torn down during unload — write still landed */
+  }
+  return ok
+}
+
+/** Test-only: drop pending autosave state so timers cannot leak between cases. */
+export function __resetAutosaveForTests(): void {
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = null
+  pendingProject = null
+}
+
+function setupAutosaveFlush(): void {
+  if (flushHooked) return
+  try {
+    if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return
+    flushHooked = true
+    window.addEventListener('pagehide', flushAutosave)
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushAutosave()
+    })
+  } catch {
+    /* non-DOM runner — autosave simply stays debounced */
+  }
+}
+
+setupAutosaveFlush()
 
 export interface ProjectStore {
   project: Project
@@ -201,7 +271,7 @@ export const useProjectStore = create<ProjectStore>()((set, get) => ({
    * closed gallery, since it shows variations of the project being replaced.
    */
   applyProject: (project, opts = {}) => {
-    const next = ensurePaletteLinks(ensureProjectFilters(project))
+    const next = migrateLayers(ensurePaletteLinks(ensureProjectFilters(project)))
     get().commit(next, { silent: true })
     set({
       past: [],
@@ -212,16 +282,23 @@ export const useProjectStore = create<ProjectStore>()((set, get) => ({
     if (useUiStore.getState().gallery !== null) useUiStore.setState({ gallery: null })
   },
 
+  /**
+   * Move the selected layer by a whole canvas unit.
+   *
+   * A commit like any other — `generationSignature` is unchanged by a placement,
+   * so no generation starts and the raster is rebuilt once at the end of a run of
+   * presses rather than per keystroke.
+   */
   nudgeLayer: (dx, dy) => {
     const s = get()
     const layer = s.project.layers.find((l) => l.id === s.selectedLayerId)
     if (!layer || layer.locked) return false
-    const cur = layerOffset(layer)
+    const cur = layerTransformOf(layer)
     s.commit(
       {
         ...s.project,
         layers: s.project.layers.map((l) =>
-          l.id === layer.id ? { ...l, offset: { x: cur.x + dx, y: cur.y + dy } } : l,
+          l.id === layer.id ? { ...l, transform: { ...cur, x: cur.x + dx, y: cur.y + dy } } : l,
         ),
       },
       { coalesce: `nudge:${layer.id}` },

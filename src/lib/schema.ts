@@ -8,6 +8,9 @@
 import type { BlendMode, IR } from './ir'
 import type { ColorMapping, ColorMode, Harmony, Palette, Ramp } from './palette'
 import type { RNG } from './rng'
+import { layerTransform, transformFromOffset, type LayerTransform } from './transform'
+
+export type { LayerTransform }
 
 /* ---- Parameter definitions --------------------------------------------- */
 
@@ -239,12 +242,21 @@ export interface Layer {
   /** group id when the layer belongs to a group */
   groupId?: string | null
   /**
-   * Manual placement, in canvas units, applied when the layer is drawn.
+   * Manual placement: move, scale and rotation, applied when the layer is drawn.
    *
-   * Optional so every project saved before drag-to-move loads unchanged, and
-   * deliberately *absent* from `layerCacheKey` — dragging must reuse the cached
-   * IR rather than regenerating up to 40k primitives per pointer move. The
-   * offset is stamped onto nodes at compose time instead.
+   * Optional so every project saved before transforms existed loads unchanged
+   * (`{}` → identity), and deliberately *absent* from `layerCacheKey` — moving a
+   * layer has to reuse the cached IR rather than regenerate up to 40k primitives
+   * per pointer move. The transform is applied to the CTM at compose time
+   * instead, so generation never sees it.
+   *
+   * Projects written before this field used `offset: { x, y }`; `migrateProject`
+   * folds those into `x`/`y`.
+   */
+  transform?: LayerTransform
+  /**
+   * Pre-transform placement, read only by the migration. A migrated layer never
+   * carries it, so `transform` and `offset` can never both be set.
    */
   offset?: { x: number; y: number }
   /**
@@ -266,9 +278,13 @@ export interface FilterInstance {
   params: Params
 }
 
-/** A layer's manual placement, defaulting to the origin. */
-export function layerOffset(l: Pick<Layer, 'offset'>): { x: number; y: number } {
-  return l.offset ?? { x: 0, y: 0 }
+/** A layer's manual placement, defaulting to identity. */
+export function layerTransformOf(l: Pick<Layer, 'transform' | 'offset'>): LayerTransform {
+  // A project that has not been through the migration still carries `offset`;
+  // reading it here means an unmigrated document places correctly even if some
+  // caller forgets to migrate.
+  if (!l.transform && l.offset) return transformFromOffset(l.offset)
+  return layerTransform(l)
 }
 
 export interface LayerGroup {

@@ -18,19 +18,21 @@ describe('summarise', () => {
     expect(s.opacity).toBe(l.opacity)
     expect(s.swatches).toBe(l.color.palette.colors)
     expect(s.groupId).toBeNull()
-    expect(s.offset).toBeNull()
+    // an unplaced layer reads as the identity transform, not as absent
+    expect(s.transform).toEqual({ x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 })
   })
 
-  test('normalises a missing group and offset', () => {
+  test('normalises a missing group and transform', () => {
     const l = createProject({ seed: 1, layers: ['smoke'] }).layers[0]
-    const s = summarise({ ...l, groupId: undefined, offset: undefined })
+    const s = summarise({ ...l, groupId: undefined, transform: undefined })
     expect(s.groupId).toBeNull()
-    expect(s.offset).toBeNull()
+    expect(s.transform?.scaleX).toBe(1)
   })
 
   test('surfaces a layer that has been moved', () => {
     const l = createProject({ seed: 1, layers: ['smoke'] }).layers[0]
-    expect(summarise({ ...l, offset: { x: 12, y: -4 } }).offset).toEqual({ x: 12, y: -4 })
+    const t = summarise({ ...l, transform: { x: 12, y: -4, scaleX: 1, scaleY: 1, rotation: 0 } })
+    expect(t.transform).toMatchObject({ x: 12, y: -4 })
   })
 
   /**
@@ -134,7 +136,10 @@ describe('summarise identity', () => {
     expect(summarise({ ...l, visible: !l.visible })).not.toBe(before)
     expect(summarise({ ...l, locked: !l.locked })).not.toBe(before)
     expect(summarise({ ...l, opacity: 0.25 })).not.toBe(before)
-    expect(summarise({ ...l, offset: { x: 5, y: 5 } })).not.toBe(before)
+    const place = (p: object) => summarise({ ...l, transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, ...p } })
+    expect(place({ x: 5, y: 5 })).not.toBe(before)
+    expect(place({ scaleX: 2, scaleY: 2 })).not.toBe(before)
+    expect(place({ rotation: 30 })).not.toBe(before)
   })
 
   test('a palette change to different colours yields a new object', () => {

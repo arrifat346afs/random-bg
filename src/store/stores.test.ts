@@ -14,13 +14,14 @@ import { clearStorage, readStorage, seedStorage } from './testSetup'
 import { initialView, useUiStore } from './uiStore'
 import { beginRender, failRender, finishRender, useRenderStore } from './renderStore'
 import { useLibraryStore } from './libraryStore'
-import { useProjectStore } from './projectStore'
+import { useProjectStore, __resetAutosaveForTests } from './projectStore'
 import { createProject } from '../lib/project'
 
 const ui = () => useUiStore.getState()
 
 beforeEach(() => {
   clearStorage()
+  __resetAutosaveForTests()
   useUiStore.setState({
     view: initialView(),
     inspectorTab: 'params',

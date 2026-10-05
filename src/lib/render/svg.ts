@@ -21,9 +21,15 @@
  */
 
 import { hexToRgb } from '../palette'
-import type { BlendMode, GradientStop, IR, Node, Paint } from '../ir'
+import type { BlendMode, GradientStop, IR, Node, Paint, TransformStamp } from '../ir'
 import { CANVAS_ONLY_BLENDS } from '../ir'
 import type { BackgroundSpec, FilterInstance } from '../schema'
+import {
+  isIdentityTransform,
+  transformAttr,
+  type LayerTransform,
+  type Pivot,
+} from '../transform'
 import { compileLayerFilter } from '../filters/svg'
 
 export interface SvgRenderOpts {
@@ -195,11 +201,8 @@ export function nodesToSvg(
     // Manual layer placement. An element transform applies to the same user
     // space the stroke-fade gradient's userSpaceOnUse stops live in, so the
     // opacity ramp stays aligned with the stroke.
-    if (node.tx !== undefined || node.ty !== undefined) {
-      attrs.push(
-        `transform="translate(${fmt(node.tx ?? 0, 2)} ${fmt(node.ty ?? 0, 2)})"`,
-      )
-    }
+    const place = nodePlacementAttr(node)
+    if (place) attrs.push(`transform="${place}"`)
 
     // Blend and filter go out as *presentation attributes*, which every
     // renderer understands, rather than CSS in a style="" attribute.
@@ -235,6 +238,26 @@ export function nodesToSvg(
     body.push(`${geo} ${attrs.join(' ')}/>`)
   }
   return { body, hasAdditive }
+}
+
+/**
+ * The SVG `transform` for a node's layer placement, or '' when it is identity.
+ *
+ * The composition order matches the canvas exactly — translate, then
+ * translate(pivot) · rotate · scale · translate(-pivot) — so a scaled or rotated
+ * layer exports to the same pixels the preview showed. See `transform.ts`.
+ */
+export function nodePlacementAttr(n: { tx?: number; ty?: number; tr?: TransformStamp }): string {
+  const t: LayerTransform = {
+    x: n.tx ?? 0,
+    y: n.ty ?? 0,
+    scaleX: n.tr?.scaleX ?? 1,
+    scaleY: n.tr?.scaleY ?? 1,
+    rotation: n.tr?.rotation ?? 0,
+  }
+  if (isIdentityTransform(t)) return ''
+  const pivot: Pivot = { x: n.tr?.px ?? 0, y: n.tr?.py ?? 0 }
+  return transformAttr(t, pivot)
 }
 
 export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
@@ -285,9 +308,8 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
     // filter on the floor.
     const dataUrl = run.lid ? opts.rasterImages?.[run.lid] : undefined
     if (run.lid && dataUrl) {
-      const tx = run.nodes[0]?.tx ?? 0
-      const ty = run.nodes[0]?.ty ?? 0
-      const transform = tx || ty ? ` transform="translate(${fmt(tx, 2)} ${fmt(ty, 2)})"` : ''
+      const placement = run.nodes[0] ? nodePlacementAttr(run.nodes[0]) : ''
+      const transform = placement ? ` transform="${placement}"` : ''
       body.push(
         `<g${transform}><image href="${esc(dataUrl)}" x="0" y="0" ` +
           `width="${fmt(ir.w, 2)}" height="${fmt(ir.h, 2)}" ` +

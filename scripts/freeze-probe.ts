@@ -44,7 +44,7 @@ const PROBES: Probe[] = [
     select: (s) =>
       s.project.layers
         .map((l) =>
-          [l.id, l.name, l.gen, l.visible, l.solo, l.locked, l.blend, l.opacity, l.groupId, l.offset?.x ?? 0, l.offset?.y ?? 0, l.color.palette.colors.join(',')].join(':'),
+          [l.id, l.name, l.gen, l.visible, l.solo, l.locked, l.blend, l.opacity, l.groupId, JSON.stringify(l.transform ?? null), l.color.palette.colors.join(',')].join(':'),
         )
         .join('|'),
     rendersParams: false,

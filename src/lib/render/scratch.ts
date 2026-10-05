@@ -57,7 +57,12 @@ export function acquireScratch(w: number, h: number): Surface | null {
     s.c.height = h
     s.x = null
   }
-  if (!s.x) s.x = s.c.getContext('2d')
+  if (!s.x) {
+    // Read back on every filtered run (`applyOffscreen` calls `getImageData`),
+    // so ask for a read-optimised context up front rather than logging a
+    // `willReadFrequently` warning per run.
+    s.x = s.c.getContext('2d', { willReadFrequently: true })
+  }
   return s.x ? s : null
 }
 

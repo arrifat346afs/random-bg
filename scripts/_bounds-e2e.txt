@@ -387,6 +387,12 @@ const forcedFilter = (ir, type) => ({
       const r = rasterCanvas(W, H, (c) => renderCanvas(ir, c, { background: BG, filters: filterOpts }))
       return { data: r.data, w: r.w, h: r.h }
     }
+    const canvasExportPlaced = (placedIr) => {
+      const r = rasterCanvas(W, H, (c) =>
+        renderCanvas(placedIr, c, { background: BG, filters: opts }),
+      )
+      return { data: r.data, w: r.w, h: r.h }
+    }
     const svgRaster = async (filterOpts) => {
       const svg = renderSVG(ir, { background: BG, ...(filterOpts ?? {}) })
       const data = await new Promise((done) => {
@@ -416,6 +422,64 @@ const forcedFilter = (ir, type) => ({
       export: clipOnlyEdges(canvasExport(opts), canvasExport(undefined), THR, FRAC),
       svg: svgOn && svgOff ? clipOnlyEdges(svgOn, svgOff, THR, FRAC) : null,
       previewVsExport: diff(preview(opts).data, canvasExport(opts).data),
+    }
+
+    /* Transformed parity: the same layer scaled 1.6 x 0.7 and rotated 33 deg
+     * about its geometry centre. Canvas and SVG must agree on how MUCH is
+     * there and show no clip-only edges — a transform applied on the canvas
+     * CTM but missing (or doubled) in the SVG `transform` attribute would
+     * move the artwork on one backend only. */
+    {
+      const placed = {
+        ...layer,
+        transform: { x: 40, y: -30, scaleX: 1.6, scaleY: 0.7, rotation: 33 },
+      }
+      const pPlaced = { ...p, layers: [placed] }
+      const irPlaced = composeIR(pPlaced, [res])
+      const at = (paint) => ({ data: paint, w: W, h: H })
+      const prevPlaced = at(raster(W, H, (ctx) => drawIR(ctx, irPlaced, 1, BG, opts)))
+      const expPlaced = canvasExportPlaced(irPlaced)
+      const svgPlacedText = renderSVG(irPlaced, { background: BG, ...opts })
+      const svgPlaced = await new Promise((done) => {
+        const img = new Image()
+        img.onload = () => {
+          const c = document.createElement('canvas')
+          c.width = W
+          c.height = H
+          const ctx = c.getContext('2d')
+          ctx.drawImage(img, 0, 0, W, H)
+          done(ctx.getImageData(0, 0, W, H).data)
+        }
+        img.onerror = () => done(null)
+        img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgPlacedText)))
+      })
+      const placedOff = at(raster(W, H, (ctx) => drawIR(ctx, irPlaced, 1, BG, undefined)))
+      // Coverage is counted on transparent renders: with the opaque
+      // gradient every pixel is "lit" on both backends and the count cannot
+      // move however much content is dropped.
+      const bareCanvas = at(raster(W, H, (ctx) => drawIR(ctx, irPlaced, 1, undefined, opts)))
+      const bareSvgText = renderSVG(irPlaced, { ...opts })
+      const bareSvg = await new Promise((done) => {
+        const img = new Image()
+        img.onload = () => {
+          const c = document.createElement('canvas')
+          c.width = W
+          c.height = H
+          const ctx = c.getContext('2d')
+          ctx.drawImage(img, 0, 0, W, H)
+          done(ctx.getImageData(0, 0, W, H).data)
+        }
+        img.onerror = () => done(null)
+        img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(bareSvgText)))
+      })
+      report.transformParity = {
+        svgDecoded: !!svgPlaced,
+        exportEdges: clipOnlyEdges(expPlaced, placedOff, THR, FRAC),
+        svgEdges: svgPlaced ? clipOnlyEdges(at(svgPlaced), placedOff, THR, FRAC) : null,
+        canvasLit: inkBox(bareCanvas.data, W, H, 1)?.px ?? 0,
+        svgLit: bareSvg ? (inkBox(bareSvg, W, H, 1)?.px ?? 0) : null,
+        previewVsExport: diff(prevPlaced.data, expPlaced.data),
+      }
     }
 
     /* Coverage: the worst-case subject (the bug shards) through the canvas

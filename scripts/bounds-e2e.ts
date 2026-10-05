@@ -5,23 +5,12 @@
  * the rendered pixels are, which needs a real Canvas2D implementation: the
  * failure mode guarded here only exists once an offscreen surface is involved.
  *
- * The bug: a layer's content was clipped to a rectangle derived from its bare
- * geometry, so a blurred additive layer lost 94 % of its pixels and was cut along
- * a hard straight seam. Four assertions now hold it shut:
+ * A clipped layer once lost 94 % of its pixels along a hard straight seam. Six
+ * assertions hold that shut: edge continuity, a no-self-composite invariant,
+ * straight edges (bug case + 38 presets), generator x filter bounds, backend
+ * parity (plain and transformed), and canvas-vs-SVG coverage.
  *
- *   1. edge continuity — the bug case with clipping on vs clipping forced off
- *      must be near-identical. Any difference is a clip that cropped something.
- *   2. straight edges  — no internal row or column may be a long, perfectly
- *      straight luminance discontinuity, in the bug case or in any of the 38
- *      original presets.
- *   3. bounds          — for every generator × every filter, the rectangle the
- *      renderer clips to must contain every pixel that ended up lit.
- *   4. parity          — preview, canvas export and SVG export must all be free
- *      of clipped edges.
- *
- * Exits non-zero on any breach. Needs the dev server up.
- *
- * Usage: bun run scripts/bounds-e2e.ts
+ * Exits non-zero on any breach. Needs the dev server up: bun run scripts/bounds-e2e.ts
  */
 
 const URL_ = process.env.APP_URL ?? 'http://127.0.0.1:5199/'
@@ -64,6 +53,14 @@ interface Report {
     previewVsExport: { mean: number; worstBlock: number }
   }
   coverage: { canvasLit: number; svgLit: number | null; svgBytes: number }
+  transformParity: {
+    svgDecoded: boolean
+    exportEdges: Edges
+    svgEdges: Edges | null
+    canvasLit: number
+    svgLit: number | null
+    previewVsExport: { mean: number; worstBlock: number }
+  }
 }
 
 const run = Bun.spawnSync(['bun', 'scripts/cdp-eval.ts', URL_, 'scripts/_bounds-e2e.txt', '9000'], {
@@ -95,6 +92,36 @@ const describe = (e: Edges): string =>
   `${e.rows.length} row(s) ${JSON.stringify(e.rows.slice(0, 3))}, ` +
   `${e.cols.length} col(s) ${JSON.stringify(e.cols.slice(0, 3))}`
 const verdict = (ok: boolean) => (ok ? 'ok' : '!! CLIPPED')
+/** One row of a clip-only edge table. Returns false when edges were found. */
+function edgeRow(label: string, edges: Edges | null, what: string): boolean {
+  if (!edges) return true
+  const ok = edges.rows.length === 0 && edges.cols.length === 0
+  if (!ok) fail(`${what} ${label} has clip-only straight edges: ${describe(edges)}`)
+  console.log(
+    pad(label, 26) + padS(edges.rows.length, 11) + padS(edges.cols.length, 11) + `  ${verdict(ok)}`,
+  )
+  return ok
+}
+/** Canvas-vs-SVG lit-pixel agreement. The blur kernels may differ; the count may not. */
+function coverageRow(label: string, canvasLit: number, svgLit: number | null, what: string): void {
+  if (svgLit === null) {
+    fail(`the SVG export of ${what} could not be rasterised for a coverage comparison`)
+    return
+  }
+  if (svgLit === 0) return
+  const ratio = canvasLit / svgLit
+  const ok = ratio >= COVERAGE_MIN && ratio <= COVERAGE_MAX
+  if (!ok) {
+    fail(
+      `${what}: canvas lit ${canvasLit} px vs svg ${svgLit} ` +
+        `(ratio ${ratio.toFixed(3)}, allowed ${COVERAGE_MIN}–${COVERAGE_MAX}) — a backend disagrees`,
+    )
+  }
+  console.log(
+    pad(label, 26) + padS(canvasLit, 11) + padS(svgLit, 11) +
+      padS(ratio.toFixed(3), 11) + `  ${verdict(ok)}`,
+  )
+}
 
 console.log('FX Forge — layer content must never be clipped to a rectangle (Chrome)')
 console.log('')
@@ -179,16 +206,25 @@ for (const [label, edges] of [
   ['canvas export', p.export],
   ['svg export', p.svg],
 ] as const) {
-  if (!edges) continue
-  const ok = edges.rows.length === 0 && edges.cols.length === 0
-  if (!ok) fail(`${label} has clip-only straight edges: ${describe(edges)}`)
-  console.log(
-    pad(label, 26) + padS(edges.rows.length, 11) + padS(edges.cols.length, 11) + `  ${verdict(ok)}`,
-  )
+  edgeRow(label, edges, 'the bug case,')
 }
 console.log(
   `  svg ${p.svgBytes} bytes · preview vs canvas export ${p.previewVsExport.mean.toFixed(3)}/255 mean, ` +
     `${p.previewVsExport.worstBlock.toFixed(2)}/255 worst block`,
+)
+
+/* 4b. transformed parity: scale 1.6 x 0.7 + rotate 33 deg ------------------- */
+console.log('')
+const tp = report.transformParity
+console.log(`${pad('transformed parity', 26)}${padS('clip rows', 11)}${padS('clip cols', 11)}  verdict`)
+console.log('-'.repeat(72))
+if (!tp.svgDecoded) fail('the transformed SVG export could not be rasterised')
+edgeRow('canvas export', tp.exportEdges, 'transformed')
+edgeRow('svg export', tp.svgEdges, 'transformed')
+coverageRow('canvas vs svg', tp.canvasLit, tp.svgLit, 'the transformed layer')
+console.log(
+  `  preview vs canvas export ${tp.previewVsExport.mean.toFixed(3)}/255 mean, ` +
+    `${tp.previewVsExport.worstBlock.toFixed(2)}/255 worst block`,
 )
 
 /* 5. coverage across backends ------------------------------------------------ */
@@ -196,23 +232,8 @@ const cov = report.coverage
 console.log('')
 console.log(`${pad('coverage', 26)}${padS('canvas', 12)}${padS('svg', 12)}${padS('ratio', 9)}  verdict`)
 console.log('-'.repeat(72))
-if (cov.svgLit === null) {
-  fail('the SVG export of the bug case could not be rasterised for a coverage comparison')
-} else if (cov.svgLit > 0) {
-  const ratio = cov.canvasLit / cov.svgLit
-  if (ratio < COVERAGE_MIN || ratio > COVERAGE_MAX) {
-    fail(
-      `the canvas export lit ${cov.canvasLit} px where the SVG export lit ${cov.svgLit} ` +
-        `(ratio ${ratio.toFixed(3)}, allowed ${COVERAGE_MIN}–${COVERAGE_MAX}) — a backend is dropping content`,
-    )
-  }
-  console.log(
-    pad('bug case, canvas vs svg', 26) + padS(cov.canvasLit, 12) + padS(cov.svgLit, 12) +
-      padS(cov.svgLit ? (cov.canvasLit / cov.svgLit).toFixed(3) : '-', 9) +
-      `  ${verdict(cov.svgLit !== null && cov.canvasLit / cov.svgLit >= COVERAGE_MIN && cov.canvasLit / cov.svgLit <= COVERAGE_MAX)}`,
-  )
-  console.log('  (coverage must agree even though the two blur kernels need not)')
-}
+coverageRow('bug case, canvas vs svg', cov.canvasLit, cov.svgLit, 'the bug case')
+console.log('  (coverage must agree even though the two blur kernels need not)')
 
 function fail(msg: string): void {
   failures.push(msg)

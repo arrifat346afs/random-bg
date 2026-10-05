@@ -14,19 +14,19 @@
 
 import { hexToRgb, type Palette } from '../palette'
 import { createRng, hash32 } from '../rng'
-import type { BlendMode, IR, Node, Paint } from '../ir'
+import type { BlendMode, IR, Node, Paint, TransformStamp } from '../ir'
 import type { BackgroundSpec, FilterInstance } from '../schema'
 import { applyFilterStack } from '../filters/canvas'
 import {
   ANTIALIAS_SLACK_PX,
   deviceBounds,
-  matrixScale,
   nodeLocalBounds,
   renderBounds,
   surfaceRect,
 } from './reach'
 import { growRect, padRect, rectArea, type Rect } from './bounds'
 import { drawSvgPath } from './path'
+import { stampMatrix } from '../transform'
 import {
   SURFACE_PX_CEILING,
   acquireScratch,
@@ -452,34 +452,35 @@ export function drawNodes(
   let ops = 0
   let i = 0
   while (i < nodes.length) {
-    // Per-layer filter stack. `composeIR` stamps `lid` on every node of a
-    // filtered layer and nothing else, so a contiguous run sharing one `lid`
-    // is exactly one layer's geometry. That whole run is rasterised offscreen
-    // and filtered as a unit — the same thing SVG does with `<g filter>`.
+    // Layer placement. Nodes are emitted layer by layer, so a contiguous run
+    // shares one transform — apply it once for the run rather than paying a
+    // save/restore per primitive.
+    //
+    // The matrix goes on the CTM *before* anything else in the run, including
+    // the filtered-run branch. That ordering is what keeps every downstream
+    // calculation correct for free: `renderBounds` measures in the layer's own
+    // (untransformed) space and `deviceBounds` maps through the real matrix, so
+    // a scaled or rotated layer's filter surface and clip are neither too small
+    // nor rotated twice.
+    const place = runTransform(nodes[i])
+    let end = i
+    while (end < nodes.length && sameTransform(nodes[end], nodes[i])) end++
+
+    if (place) {
+      ctx.save()
+      applyPlace(ctx, place)
+    }
+
     const lid = nodes[i].lid
     const filters = lid ? o.layerFilters?.[lid] : undefined
     if (lid && filters && filters.length > 0) {
-      let end = i
-      while (end < nodes.length && nodes[end].lid === lid) end++
+      // The whole run is one layer's geometry. Rasterise it offscreen and
+      // filter as a unit — the same thing SVG does with `<g filter>`.
       drawFilteredRun(ctx, nodes, i, end, filters, o)
+      if (place) ctx.restore()
       i = end
       continue
     }
-
-    // Manual layer placement. Nodes are emitted layer by layer, so a contiguous
-    // run shares one offset — translate once for the run rather than paying a
-    // save/restore per primitive. This has to happen *before* the blur clip is
-    // priced, because deviceFilterArea maps the node's bounds through the
-    // current transform.
-    const tx = nodes[i].tx ?? 0
-    const ty = nodes[i].ty ?? 0
-    const moved = tx !== 0 || ty !== 0
-    if (moved) {
-      ctx.save()
-      ctx.translate(tx, ty)
-    }
-    let end = i
-    while (end < nodes.length && (nodes[end].tx ?? 0) === tx && (nodes[end].ty ?? 0) === ty) end++
 
     let j = i
     while (j < end) {
@@ -509,10 +510,63 @@ export function drawNodes(
       j++
     }
 
-    if (moved) ctx.restore()
+    if (place) ctx.restore()
     i = end
   }
   return ops
+}
+
+/** A node's placement, or null when it sits at the identity. */
+interface RunPlace {
+  tx: number
+  ty: number
+  tr: TransformStamp | null
+}
+
+/** The placement stamped on the first node of a run. */
+function runTransform(n: Node): RunPlace | null {
+  const tx = n.tx ?? 0
+  const ty = n.ty ?? 0
+  const tr = n.tr ?? null
+  if (tx === 0 && ty === 0 && !tr) return null
+  return { tx, ty, tr }
+}
+
+/**
+ * Two nodes belong to the same run when their placement **and** their owning
+ * layer are identical.
+ *
+ * `lid` has to be part of this: two untransformed layers both carry
+ * `tx = 0, ty = 0, tr = undefined`, so grouping on placement alone would fuse
+ * neighbouring layers into one run — and the fused run would then be filtered
+ * with the *first* layer's stack.
+ */
+function sameTransform(a: Node, b: Node): boolean {
+  return (
+    (a.tx ?? 0) === (b.tx ?? 0) &&
+    (a.ty ?? 0) === (b.ty ?? 0) &&
+    a.tr === b.tr &&
+    a.lid === b.lid
+  )
+}
+
+/**
+ * Put a run's placement on the CTM.
+ *
+ * `tr` is compared by reference: `composeIR` freezes one stamp per layer and
+ * shares it across that layer's nodes, so identity is a pointer compare and a
+ * 40k-node layer never re-applies the matrix. `stampMatrix` is the same function
+ * the SVG backend and the tests use, so preview and export cannot disagree.
+ */
+function applyPlace(ctx: CanvasRenderingContext2D, p: RunPlace): void {
+  if (p.tr) ctx.transform(...matrixOf(p.tx, p.ty, p.tr))
+  else ctx.translate(p.tx, p.ty)
+}
+
+/** `ctx.transform` wants positional args; the matrix is an object. */
+function matrixOf(tx: number, ty: number, tr: TransformStamp): [number, number, number, number, number, number] {
+  const m = stampMatrix(tx, ty, tr)
+  return [m.a, m.b, m.c, m.d, m.e, m.f]
 }
 
 /**
@@ -549,16 +603,28 @@ function drawFilteredRun(
   const cw = ctx.canvas.width
   const ch = ctx.canvas.height
   const run = nodes.slice(i, j)
-  const tx = nodes[i].tx ?? 0
-  const ty = nodes[i].ty ?? 0
+
+  // The run loop puts the layer's placement on the CTM before this branch, so
+  // every node below is measured and drawn in the layer's own space. Measuring
+  // the stamped nodes here would add their `tx`/`ty` on top of a CTM that
+  // already carries them — translating the surface twice — and drawing them
+  // stamped would transform the layer twice. Strip both, once.
+  const unplaced = run.map((n) =>
+    n.tx || n.ty || n.tr ? { ...n, tx: 0, ty: 0, tr: undefined } : n,
+  )
 
   // One rect for the surface *and* the composite clip, from the one bounds
-  // function. `scale` converts the device surface back to IR units so the canvas
-  // clamp and the canvas-relative filter spreads are expressed in the same
-  // space the render bounds are computed in.
-  const scale = matrixScale(t) || 1
-  const spreadCtx = { width: Math.max(1, cw / scale), height: Math.max(1, ch / scale) }
-  const expanded = renderBounds(run, {
+  // function. The nodes are measured in the layer's own space — the CTM already
+  // carries the placement — so a scaled or rotated layer needs no special case
+  // here and its spread is scaled by the real matrix rather than by `m.a`.
+  //
+  // The clamp is the canvas in IR units, which is the device size divided by
+  // the *export* scale (`o.px`) — not by the CTM's full scale. The CTM includes
+  // the layer's own matrix, so dividing by it would shrink the clamp by the
+  // layer's scale and slice the surface (a 1.6× layer lost its bottom half).
+  const px = o.px || 1
+  const spreadCtx = { width: Math.max(1, cw / px), height: Math.max(1, ch / px) }
+  const expanded = renderBounds(unplaced, {
     filters,
     width: spreadCtx.width,
     height: spreadCtx.height,
@@ -576,7 +642,7 @@ function drawFilteredRun(
   if (!s || !s.x) {
     // No canvas to filter on (headless). Draw unfiltered rather than dropping
     // the layer — the filters need real pixels, and there are none here.
-    drawRunPlain(ctx, nodes, i, j, o, tx, ty)
+    drawRunPlain(ctx, nodes, i, j, o)
     return
   }
 
@@ -592,7 +658,7 @@ function drawFilteredRun(
     // The nested draw must not re-arm the global pixel budget, or a layer with
     // a filter stack would get a fresh one and blow the ceiling.
     const budget = filterPxLeft
-    drawNodes(sx, run, { ...o, skipBlur: false, layerFilters: undefined })
+    drawNodes(sx, unplaced, { ...o, skipBlur: false, layerFilters: undefined })
     filterPxLeft = budget
 
     const filtered = applyOffscreen(s, w, h, filters, nodes[i].lid ?? '', o)
@@ -632,24 +698,21 @@ function applyOffscreen(
   return s.c
 }
 
-/** Unfiltered fallback for a run, honouring its shared manual placement. */
+/**
+ * Unfiltered fallback for a run.
+ *
+ * The layer's placement is already on the CTM (see `applyPlace`), so this only
+ * has to draw the shapes in order.
+ */
 function drawRunPlain(
   ctx: CanvasRenderingContext2D,
   nodes: Node[],
   i: number,
   j: number,
   o: DrawOpts,
-  tx: number,
-  ty: number,
 ): void {
-  const moved = tx !== 0 || ty !== 0
-  if (moved) {
-    ctx.save()
-    ctx.translate(tx, ty)
-  }
   const inner: DrawOpts = { ...o, layerFilters: undefined }
   for (let k = i; k < j; k++) drawNode(ctx, nodes[k], inner)
-  if (moved) ctx.restore()
 }
 
 /**

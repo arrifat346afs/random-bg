@@ -19,7 +19,7 @@
  */
 
 import type { BlendMode } from '@/lib/ir'
-import type { Layer, LayerGroup } from '@/lib/schema'
+import { layerTransformOf, type Layer, type LayerGroup, type LayerTransform } from '../../lib/schema'
 
 export interface LayerSummary {
   id: string
@@ -34,7 +34,7 @@ export interface LayerSummary {
   /** resolved palette colours, for the row's swatch strip */
   swatches: string[]
   /** manual placement, so a moved layer can be marked */
-  offset: { x: number; y: number } | null
+  transform: LayerTransform | null
 }
 
 /**
@@ -67,8 +67,11 @@ function sameFields(a: LayerSummary, b: LayerSummary): boolean {
     a.blend !== b.blend ||
     a.opacity !== b.opacity ||
     a.groupId !== b.groupId ||
-    a.offset?.x !== b.offset?.x ||
-    a.offset?.y !== b.offset?.y ||
+    a.transform?.x !== b.transform?.x ||
+    a.transform?.y !== b.transform?.y ||
+    a.transform?.scaleX !== b.transform?.scaleX ||
+    a.transform?.scaleY !== b.transform?.scaleY ||
+    a.transform?.rotation !== b.transform?.rotation ||
     a.swatches.length !== b.swatches.length
   ) {
     return false
@@ -95,7 +98,7 @@ export function summarise(layer: Layer): LayerSummary {
     opacity: layer.opacity,
     groupId: layer.groupId ?? null,
     swatches: layer.color.palette.colors,
-    offset: layer.offset ?? null,
+    transform: layerTransformOf(layer),
   }
   const prev = cache.get(next.id)
   if (prev && sameFields(prev, next)) return prev

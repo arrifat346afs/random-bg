@@ -54,6 +54,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
   const generating = useRenderStore((s) => s.generating)
   const theme = useUiStore((s) => s.view.theme)
   const lockAspect = useUiStore((s) => s.view.lockAspect)
+  const snapToCanvas = useUiStore((s) => s.view.snapToCanvas)
   const canUndoNow = useProjectStore((s) => s.past.length > 0)
   const canRedoNow = useProjectStore((s) => s.future.length > 0)
   const storageOk = useUiStore((s) => s.storageAvailable)
@@ -227,6 +228,20 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
                 id="randomise-aspect"
                 checked={!lockAspect}
                 onCheckedChange={(v) => useUiStore.getState().setLockAspect(!v)}
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-3 px-2 py-1.5">
+              <label htmlFor="snap-to-canvas" className="cursor-pointer text-xs leading-tight">
+                Snap to canvas
+                <span className="block text-[10px] text-muted-foreground">
+                  {snapToCanvas ? 'Edges and centre, with guides' : 'Off — free placement'}
+                </span>
+              </label>
+              <Switch
+                id="snap-to-canvas"
+                checked={snapToCanvas}
+                onCheckedChange={(v) => useUiStore.getState().patchView({ snapToCanvas: v })}
               />
             </div>
 

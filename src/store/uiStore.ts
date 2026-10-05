@@ -29,6 +29,7 @@ import { variations } from '../lib/randomize'
 import type { Harmony } from '../lib/palette'
 import { useProjectStore } from './projectStore'
 import type { Project } from '../lib/schema'
+import type { LayerTransform } from '../lib/transform'
 
 export interface ViewState {
   zoom: number
@@ -42,6 +43,12 @@ export interface ViewState {
    * and rolling a fresh size was the odd one out.
    */
   lockAspect: boolean
+  /**
+   * Pull a dragged layer's edges and centre onto the canvas edges and centre
+   * line, drawing a guide when one fires. Off by default: snapping moves artwork
+   * by a few units, which is a surprise if you did not ask for it.
+   */
+  snapToCanvas: boolean
 }
 
 /**
@@ -59,6 +66,7 @@ export function initialView(saved?: Partial<ViewState> | null): ViewState {
     checker: true,
     theme: initialTheme(),
     lockAspect: true,
+    snapToCanvas: false,
   }
   return saved ? { ...base, ...saved, theme: base.theme } : base
 }
@@ -120,11 +128,11 @@ export interface RasterMeta {
   ir: unknown
 }
 
-/** A live drag on the stage: panning the view, or moving a layer. */
+/** A live drag on the stage: panning the view, or transforming a layer. */
 export interface StageDrag {
   /** pointerId, so a stale gesture from another finger is ignored */
   id: number
-  mode: 'pan' | 'move'
+  mode: 'pan' | 'move' | 'scale' | 'rotate'
   /** where the pointer went down, in client coords */
   x: number
   y: number
@@ -135,6 +143,35 @@ export interface StageDrag {
   oy: number
   /** true once the pointer has travelled far enough to count as a drag */
   moved: boolean
+}
+
+/**
+ * The placement of a layer **during** a gesture, before it is committed.
+ *
+ * Transient on purpose. A drag must not touch `project`: committing on every
+ * pointermove bumped `projectStore.version`, which started a generation, which
+ * posted the project to the worker, cloned every result back, produced a new IR
+ * from `composeIR`, and so invalidated the raster cache — re-rasterising 40k
+ * blurred primitives (~208 ms measured) once per pointermove. Holding the
+ * placement here instead keeps the drag at one `drawImage` per frame.
+ *
+ * Written at most once per animation frame by `useStageDrag`.
+ */
+export interface LiveTransform {
+  layerId: string
+  transform: LayerTransform
+  /** true once the pointer has moved far enough to count as a drag */
+  moved: boolean
+}
+
+/** A snap guide drawn on the stage while a gesture is running. */
+export interface SnapGuide {
+  /** 'x' is a vertical rule at `at`; 'y' is a horizontal one */
+  axis: 'x' | 'y'
+  at: number
+  /** the span the rule covers, so it reads as a guide and not a stray line */
+  from: number
+  to: number
 }
 
 export interface UiStore {
@@ -249,6 +286,13 @@ export interface UiStore {
   /** Debounce handle for the post-zoom re-raster. Never selected. */
   refineTimer: number | null
   stageDrag: StageDrag | null
+  /**
+   * Placement of the layer being dragged, mid-gesture. Never committed until
+   * pointer-up. Subscribed only by the stage draw path and the overlay.
+   */
+  liveTransform: LiveTransform | null
+  /** snap rules to draw while a gesture runs */
+  guides: SnapGuide[]
   /** bump counter to force a redraw after a debounced re-raster */
   refineTick: number
   /** Drives the grab cursor; kept in step with the module-level space flag. */
@@ -302,6 +346,9 @@ export interface UiStore {
   setRasterMeta: (meta: UiStore['rasterMeta']) => void
   setRefineTimer: (t: number | null) => void
   setStageDrag: (drag: StageDrag | null) => void
+  /** Update the mid-gesture placement; at most one call per animation frame. */
+  setLiveTransform: (live: LiveTransform | null) => void
+  setGuides: (guides: SnapGuide[]) => void
   /** Keeps the grab cursor in sync with the module-level space-held flag. */
   patchSpaceHeld: (held: boolean) => void
   bumpRefine: () => void
@@ -378,6 +425,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   canvasRef: null,
   rasterCanvas: null,
   stageDrag: null,
+  liveTransform: null,
+  guides: [],
   refineTick: 0,
   spaceHeld: false,
   rasterMeta: null,
@@ -578,6 +627,9 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   },
   /** Runs on every pointermove, so an unchanged drag must not notify. */
   setStageDrag: (stageDrag) => set((s) => (Object.is(s.stageDrag, stageDrag) ? s : { stageDrag })),
+  setLiveTransform: (liveTransform) =>
+    set((s) => (Object.is(s.liveTransform, liveTransform) ? s : { liveTransform })),
+  setGuides: (guides) => set((s) => (s.guides === guides ? s : { guides })),
   patchSpaceHeld: (spaceHeld) => set({ spaceHeld }),
   bumpRefine: () => set((s) => ({ refineTick: s.refineTick + 1 })),
 }))

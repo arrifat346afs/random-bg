@@ -261,49 +261,108 @@ let placeFailures = 0
   const { createProject, createLayer } = await import('../src/lib/project')
   const { generateLayer, composeIR, layerCacheKey } = await import('../src/lib/pipeline')
   const { projectToSvg } = await import('../src/lib/export')
-  const { boundsOfNodes, layerBoundsFor } = await import('../src/lib/select')
-  const { maxNodeSpread } = await import('../src/lib/render/reach')
+  const { boundsOfNodes, layerGeometryBox } = await import('../src/lib/select')
+  const { generationSignature } = await import('../src/lib/generation')
+  const { pivotOf, transformMatrix, stampMatrix } = await import('../src/lib/transform')
+  const { createFilter } = await import('../src/lib/filters/stack')
 
   const p = createProject({ seed: 11, layers: [] })
   p.canvas = { w: 400, h: 300, bg: { kind: 'transparent' } }
   const base = createLayer('geometric', 1)
-  const moved = { ...base, offset: { x: 100, y: 50 } }
+  p.layers = [base]
+  const moved = { ...base, transform: { x: 100, y: 50, scaleX: 1, scaleY: 1, rotation: 0 } }
   const res = { ...(await generateLayer(base, p)), layerId: base.id }
   const movedProject = { ...p, layers: [moved] }
 
   const keySame = layerCacheKey(base, p) === layerCacheKey(moved, p)
   if (!keySame) {
     placeFailures++
-    console.log('  !! layer.offset changes the cache key — dragging would regenerate')
-  } else console.log('  offset leaves the layer cache key intact ✓')
+    console.log('  !! Layer.transform changes the cache key — dragging would regenerate')
+  } else console.log('  transform leaves the layer cache key intact ✓')
 
-  // The selection box is drawn from `renderBounds`, so it is the content box
-  // grown by the layer's spread. A canvas big enough that nothing clamps is
-  // used here so the offset arithmetic is the only thing under test.
-  const big = { ...p, canvas: { w: 2000, h: 1500, bg: { kind: 'transparent' as const } } }
-  const movedBig = { ...big, layers: [moved] }
-  const spread = maxNodeSpread(res.ir.nodes)
-  const b0 = boundsOfNodes(res.ir.nodes)
-  const b1 = layerBoundsFor([res], movedBig, moved.id)
-  const boxOk =
-    !!b0 &&
-    !!b1 &&
-    Math.abs(b1.x0 - (b0.x0 - spread + 100)) < 0.01 &&
-    Math.abs(b1.y0 - (b0.y0 - spread + 50)) < 0.01
-  if (!boxOk) {
+  // A placement must not start a generation. `generationSignature` is what
+  // `useRenderer` gates on, so this is the assertion that keeps the "Generating"
+  // bar off a drag, a resize and a filter edit.
+  const failuresBefore = placeFailures
+  const sigBase = generationSignature(p)
+  const sigOf = (l: Record<string, unknown>) => generationSignature({ ...p, layers: [l as never] })
+  const noGeneration = [
+    ['move', sigOf({ ...base, transform: { x: 100, y: 50, scaleX: 1, scaleY: 1, rotation: 0 } })],
+    ['scale+rotate', sigOf({ ...base, transform: { x: 0, y: 0, scaleX: 2.5, scaleY: 2.5, rotation: 33 } })],
+    ['filter', sigOf({ ...base, filters: [createFilter('gaussian-blur')!] })],
+  ] as const
+  for (const [what, sig] of noGeneration) {
+    if (sig !== sigBase) {
+      placeFailures++
+      console.log(`  !! a ${what} edit changed the generation signature`)
+    }
+  }
+  if (placeFailures === failuresBefore) {
+    console.log('  move / scale / rotate / filter leave the generation signature intact ✓')
+  }
+  if (sigOf({ ...base, params: { ...base.params, count: 42 } }) === sigBase) {
     placeFailures++
-    console.log('  !! selection bounds ignore Layer.offset')
-  } else console.log('  selection bounds follow the offset ✓')
+    console.log('  !! a parameter edit did NOT change the generation signature')
+  } else console.log('  a parameter edit does change the generation signature ✓')
 
-  // a composed IR already carries tx/ty; adding the offset again would
+  // The transform box follows the layer's GEOMETRY, transformed, and is not
+  // clamped to the canvas: a layer dragged off the edge still shows its box.
+  const local = boundsOfNodes(res.ir.nodes)
+  const movedBox = layerGeometryBox([res], movedProject, moved.id)
+  if (!local || !movedBox) {
+    placeFailures++
+    console.log('  !! layerGeometryBox produced nothing')
+  } else if (
+    Math.abs(movedBox.x0 - (local.x0 + 100)) > 0.01 ||
+    Math.abs(movedBox.y0 - (local.y0 + 50)) > 0.01
+  ) {
+    placeFailures++
+    console.log(`  !! the transform box ignored the placement: ${JSON.stringify(movedBox)}`)
+  } else console.log('  the transform box follows the placement ✓')
+
+  const offEdge = { ...base, transform: { x: 900, y: 0, scaleX: 1, scaleY: 1, rotation: 0 } }
+  const offBox = layerGeometryBox([res], { ...p, layers: [offEdge] }, offEdge.id)
+  if (!offBox || offBox.x1 <= p.canvas.w) {
+    placeFailures++
+    console.log('  !! the transform box is clamped to the canvas')
+  } else console.log('  the transform box is not clamped to the canvas ✓')
+
+  // Scaled and rotated placement must survive composeIR, and the stamped matrix
+  // must be the one `transform.ts` computes.
+  {
+    const scaled = { ...base, transform: { x: 10, y: 20, scaleX: 2, scaleY: 3, rotation: 90 } }
+    const composed = composeIR({ ...p, layers: [scaled] }, [res])
+    const n = composed.nodes.find((x) => x.tx === 10 && x.ty === 20)
+    if (!n?.tr) {
+      placeFailures++
+      console.log('  !! composeIR dropped a scaled/rotated placement')
+    } else {
+      const want = transformMatrix(scaled.transform, pivotOf(local))
+      const got = stampMatrix(n.tx ?? 0, n.ty ?? 0, n.tr)
+      const diff = Math.max(
+        Math.abs(want.a - got.a),
+        Math.abs(want.b - got.b),
+        Math.abs(want.c - got.c),
+        Math.abs(want.d - got.d),
+        Math.abs(want.e - got.e),
+        Math.abs(want.f - got.f),
+      )
+      if (diff > 1e-9) {
+        placeFailures++
+        console.log(`  !! the stamped matrix disagrees with transformMatrix by ${diff}`)
+      } else console.log('  composeIR stamps the same matrix transform.ts computes ✓')
+    }
+  }
+
+  // a composed IR already carries the placement; stamping it again would
   // double-count it
-  const composed = composeIR(movedBig, [res])
+  const composed = composeIR(movedProject, [res])
   const bc = boundsOfNodes(composed.nodes)
-  const noDouble = !!bc && !!b1 && Math.abs(bc.x0 - spread - b1.x0) < 0.01
+  const noDouble = !!bc && !!local && Math.abs(bc.x0 - (local.x0 + 100)) < 0.01
   if (!noDouble) {
     placeFailures++
-    console.log('  !! offset applied twice to a composed IR')
-  } else console.log('  offset is not double-counted on a composed IR ✓')
+    console.log('  !! placement applied twice to a composed IR')
+  } else console.log('  placement is not double-counted on a composed IR ✓')
 
   const { svg } = projectToSvg(movedProject, [res])
   const stamped = composed.nodes.filter((n) => n.tx === 100 && n.ty === 50).length

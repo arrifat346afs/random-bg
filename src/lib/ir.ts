@@ -107,6 +107,26 @@ export const CANVAS_ONLY_BLENDS = new Set<BlendMode>(['plus-lighter'])
 
 /* ---- Nodes ------------------------------------------------------------- */
 
+/**
+ * A layer's scale/rotation/pivot, stamped on every node of a transformed layer.
+ *
+ * Stored as one **shared, frozen** object per layer rather than five numbers per
+ * node: a 40k-node layer would otherwise allocate 40k copies, and the render path
+ * only ever reads it. Translation is not here — it stays on `Node.tx/ty` because
+ * that is the field `boundsOfNodes` and the SVG run-group transform have always
+ * used, and keeping it means an untransformed layer's IR is byte-identical to
+ * what it was before transforms existed.
+ */
+export interface TransformStamp {
+  scaleX: number
+  scaleY: number
+  /** clockwise degrees */
+  rotation: number
+  /** pivot in canvas units; defaults to the centre of the layer's geometry */
+  px: number
+  py: number
+}
+
 export interface Node {
   g: Geo
   fill?: Paint | null
@@ -132,6 +152,11 @@ export interface Node {
    */
   tx?: number
   ty?: number
+  /**
+   * The owning layer's scale/rotation, when it has any. Shared by reference
+   * across every node of the layer — see `TransformStamp`.
+   */
+  tr?: TransformStamp
   /**
    * Owning layer, stamped only for layers whose filter stack is non-empty.
    *

@@ -12,10 +12,11 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import './testSetup'
 import { clearStorage } from './testSetup'
-import { canRedo, canUndo, selectedLayer, useProjectStore } from './projectStore'
+import { canRedo, canUndo, selectedLayer, useProjectStore, __resetAutosaveForTests } from './projectStore'
 import { useRenderStore } from './renderStore'
 import { useUiStore } from './uiStore'
 import { createProject } from '../lib/project'
+import { layerTransformOf } from '../lib/schema'
 
 /**
  * Zustand stores are singletons with no reset API, so each test resets the
@@ -38,6 +39,7 @@ const p = () => useProjectStore.getState()
 
 beforeEach(() => {
   clearStorage()
+  __resetAutosaveForTests()
   reset()
 })
 
@@ -206,7 +208,7 @@ describe('nudgeLayer', () => {
   test('accumulates', () => {
     p().nudgeLayer(10, 0)
     p().nudgeLayer(0, 5)
-    expect(p().project.layers[0].offset).toEqual({ x: 10, y: 5 })
+    expect(layerTransformOf(p().project.layers[0])).toMatchObject({ x: 10, y: 5 })
   })
 
   test('a run of nudges is one undo entry', () => {
@@ -218,7 +220,7 @@ describe('nudgeLayer', () => {
     p().nudgeLayer(3, 3)
     p().nudgeLayer(3, 3)
     p().undo()
-    expect(p().project.layers[0].offset).toBeUndefined()
+    expect(layerTransformOf(p().project.layers[0])).toMatchObject({ x: 0, y: 0 })
   })
 
   test('refuses a locked layer', () => {
@@ -227,12 +229,56 @@ describe('nudgeLayer', () => {
       project: { ...p().project, layers: p().project.layers.map((l) => (l.id === id ? { ...l, locked: true } : l)) },
     })
     expect(p().nudgeLayer(50, 50)).toBe(false)
-    expect(p().project.layers.find((x) => x.id === id)?.offset).toBeUndefined()
+    expect(layerTransformOf(p().project.layers.find((x) => x.id === id)!)).toMatchObject({ x: 0, y: 0 })
   })
 
   test('no selection is a no-op', () => {
     p().selectLayer(null)
     expect(p().nudgeLayer(5, 5)).toBe(false)
+  })
+})
+
+/* ---- transform gestures -------------------------------------------------- */
+
+describe('transform commit', () => {
+  test('a move and a resize each land as exactly one history entry', () => {
+    // This is the commit path every gesture ends with: `endLayerGesture` calls
+    // `updateLayer` once per pointer-up, so one entry per gesture by
+    // construction. A second gesture with the same coalesce key and window
+    // would merge — a *different* gesture must not.
+    const id = p().selectedLayerId as string
+    p().updateLayer(
+      id,
+      (l) => ({ ...l, transform: { x: 30, y: 12, scaleX: 1, scaleY: 1, rotation: 0 } }),
+      { coalesce: 'transform:move:' + id },
+    )
+    expect(p().past).toHaveLength(1)
+    p().undo()
+    expect(layerTransformOf(p().project.layers[0])).toMatchObject({ x: 0, y: 0 })
+    expect(p().past).toHaveLength(0)
+  })
+
+  test('a resize is one entry and undo restores scale and rotation', () => {
+    const id = p().selectedLayerId as string
+    p().updateLayer(
+      id,
+      (l) => ({ ...l, transform: { x: 4, y: -2, scaleX: 1.6, scaleY: 0.7, rotation: 33 } }),
+      { coalesce: 'transform:scale:' + id },
+    )
+    expect(p().past).toHaveLength(1)
+    expect(layerTransformOf(p().project.layers[0])).toMatchObject({
+      scaleX: 1.6,
+      scaleY: 0.7,
+      rotation: 33,
+    })
+    p().undo()
+    expect(layerTransformOf(p().project.layers[0])).toMatchObject({
+      x: 0,
+      y: 0,
+      scaleX: 1,
+      scaleY: 1,
+      rotation: 0,
+    })
   })
 })
 
@@ -296,5 +342,25 @@ describe('updateLayer', () => {
     p().updateLayer(id, (l) => ({ ...l, params: { ...l.params, sizeMin: 0.9 } }))
     expect(p().project.layers[0].name).toBe(name)
     expect(p().project.layers[0].gen).toBe(useProjectStore.getState().project.layers[0].gen)
+  })
+})
+
+/* ---- autosave ------------------------------------------------------------ */
+
+describe('autosave flush', () => {
+  test('a commit is pending until flushed, then lands in storage', async () => {
+    const { readStorage } = await import('./testSetup')
+    const { KEYS } = await import('./persistence')
+    const { flushAutosave } = await import('./projectStore')
+    p().commit({ ...p().project, name: 'unsaved-edit' })
+    flushAutosave()
+    const raw = readStorage(KEYS.project)
+    expect(raw).not.toBeNull()
+    expect(JSON.parse(raw as string).name).toBe('unsaved-edit')
+  })
+
+  test('flush with nothing pending is a no-op success', async () => {
+    const { flushAutosave } = await import('./projectStore')
+    expect(flushAutosave()).toBe(true)
   })
 })
