@@ -15,7 +15,8 @@
  */
 
 import { hash32 } from './rng'
-import { quenchAdditive, randomProject } from './randomize'
+import { oklchFromRgb } from './field/oklab'
+import { quenchAdditive, softenHarsh, randomProject } from './randomize'
 import { activeLayers, totalPrimitives, type LayerResult } from './pipeline'
 import { compositeLayers } from './export'
 import { renderCanvas } from './render/canvas'
@@ -54,6 +55,8 @@ export const HUES_MAX = 6
 export const FOCAL_MIN = 8
 /** Uniform-grid coverage above which the grid dominates the canvas. */
 export const GRID_COVERAGE_MAX = 40
+/** Edge harshness above which saturated edges read cheap (calibrated). */
+export const HARSH_MAX = 1.5
 /** % of composite pixels at pure white above which highlights have clipped. */
 export const WHITE_CAP = 3
 /** Largest single pure-white region (% of canvas) above which it reads as a hole. */
@@ -78,6 +81,12 @@ export interface Metrics {
   hueCount: number
   /** Luminance gap between the brightness centre-of-mass region and the rest. */
   focal: number
+  /**
+   * Edge harshness: mean over edge pixels of (step × OKLab delta × chroma of
+   * the brighter side) × 100. Hard saturated edges on dark read ~10+; calm
+   * gradients read < 1.
+   */
+  harshness: number
   /** True when a uniform grid layer (mosaic, geometric grid) is present. */
   gridLayer: boolean
   /** Standard deviation of luma — "is there any structure at all". */
@@ -104,6 +113,7 @@ export interface Reason {
     | 'manyHues'
     | 'noFocus'
     | 'gridPattern'
+    | 'harsh'
   why: string
 }
 
@@ -190,6 +200,11 @@ export function judge(m: Metrics): Verdict {
       code: 'gridPattern',
       why: `uniform grid covers ${m.coverage.toFixed(1)}% > ${GRID_COVERAGE_MAX}%`,
     })
+  if (m.harshness > HARSH_MAX)
+    soft.push({
+      code: 'harsh',
+      why: `edge harshness ${m.harshness.toFixed(1)} > ${HARSH_MAX}`,
+    })
 
   const ok = hard.length === 0 && soft.length < 2
 
@@ -202,6 +217,7 @@ export function judge(m: Metrics): Verdict {
   score += Math.min(m.focal, 40) * 0.25 // a clear focal region
   score -= Math.max(0, m.hueCount - 4) * 4 // limited palette
   score -= Math.max(0, m.edge - 0.2) * 50 // calm surfaces
+  score -= Math.max(0, m.harshness - 3) * 3 // harsh saturated edges
   score -= soft.length * 12 // each penalty costs a little
   score -= hard.length * 40 // hard failures rank last
 
@@ -365,11 +381,25 @@ export function measureProject(project: Project, results: LayerResult[]): Metric
   let fInN = 0
   let fOut = 0
   let fOutN = 0
+  const harshScores: number[] = []
   for (let y = 0; y < bh; y++) {
     for (let x = 0; x < bw; x++) {
       const i = y * bw + x
       if (x < bw - 1 && y < bh - 1) {
-        if (Math.abs(lum[i] - lum[i + 1]) + Math.abs(lum[i] - lum[i + bw]) > 30) edgeN++
+        const step = Math.abs(lum[i] - lum[i + 1]) + Math.abs(lum[i] - lum[i + bw])
+        if (step > 30) {
+          edgeN++
+          // harshness: sharpness × OKLab distance × chroma of the brighter side
+          const o1 = i * 4
+          const o2 = (i + 1) * 4
+          const c1 = oklchFromRgb(pd[o1], pd[o1 + 1], pd[o1 + 2])
+          const c2 = oklchFromRgb(pd[o2], pd[o2 + 1], pd[o2 + 2])
+          const r1 = (c1.H * Math.PI) / 180
+          const r2 = (c2.H * Math.PI) / 180
+          const delta = Math.hypot(c1.L - c2.L, c1.C * Math.cos(r1) - c2.C * Math.cos(r2), c1.C * Math.sin(r1) - c2.C * Math.sin(r2))
+          const bright = lum[i] >= lum[i + 1] ? c1 : c2
+          harshScores.push((step / 255) * delta * bright.C)
+        }
       }
       const o = i * 4
       const [h, s] = rgbSatHue(pd[o], pd[o + 1], pd[o + 2])
@@ -392,6 +422,16 @@ export function measureProject(project: Project, results: LayerResult[]): Metric
   const gridLayer = project.layers.some(
     (l) => l.gen === 'mosaic' || (l.gen === 'geometric' && (l.params.mode === 'grid' || l.params.mode === 'hexGrid')),
   )
+  // harshness: mean of the hottest decile of edge scores — a few hard
+  // saturated edges must not drown in a majority of soft ones
+  let harshness = 0
+  if (harshScores.length > 0) {
+    harshScores.sort((a, b) => b - a)
+    const k = Math.max(1, Math.ceil(harshScores.length / 10))
+    let top = 0
+    for (let i = 0; i < k; i++) top += harshScores[i]
+    harshness = (top / k) * 100
+  }
 
   return {
     coverage: (covered / Math.max(1, n)) * 100,
@@ -400,6 +440,7 @@ export function measureProject(project: Project, results: LayerResult[]): Metric
     whiteComposite: (whiteComp / Math.max(1, n)) * 100,
     whiteRegion,
     edge: edgeN / Math.max(1, (bw - 1) * (bh - 1)),
+    harshness,
     hueCount,
     focal: Math.abs(fIn / Math.max(1, fInN) - fOut / Math.max(1, fOutN)),
     gridLayer,
@@ -446,6 +487,11 @@ function onlyWhiteFailure(v: Verdict): boolean {
     v.hard.every((r) => r.code === 'whiteCap' || r.code === 'whiteRegion' || r.code === 'blown') &&
     v.soft.length < 2
   )
+}
+
+/** True when the only complaint is harsh saturated edges (rescuable by soften). */
+function onlyHarshFailure(v: Verdict): boolean {
+  return v.hard.length === 0 && v.soft.length > 0 && v.soft.every((r) => r.code === 'harsh')
 }
 
 /**
@@ -500,6 +546,19 @@ export async function randomProjectChecked(
         const reVerdict = judge(reMetrics)
         onAttempt?.({ project: rescued, metrics: reMetrics, verdict: reVerdict, attempt: i + 1 })
         attempt = { project: rescued, metrics: reMetrics, verdict: reVerdict, attempts: i + 1, budgetHit: false }
+        verdict = reVerdict
+      }
+    }
+    // Harsh-only failure → same treatment via softenHarsh (halved outlines,
+    // dimmed flat overlays, leashed chroma).
+    if (!verdict.ok && onlyHarshFailure(verdict)) {
+      const softened = softenHarsh(attempt.project)
+      const reOut = await requestRender(softened, () => {})
+      if (reOut.results.length === activeLayers(softened).length) {
+        const reMetrics = measureProject(softened, reOut.results)
+        const reVerdict = judge(reMetrics)
+        onAttempt?.({ project: softened, metrics: reMetrics, verdict: reVerdict, attempt: i + 1 })
+        attempt = { project: softened, metrics: reMetrics, verdict: reVerdict, attempts: i + 1, budgetHit: false }
         verdict = reVerdict
       }
     }

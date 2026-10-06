@@ -74,11 +74,30 @@ export function hexFromOklab(lab: OkLab): string {
 
 /** Hex → OKLCH. */
 export function oklchFromHex(hex: string): OkLCH {
-  const { L, a, b } = oklabFromHex(hex)
-  const C = Math.hypot(a, b)
-  let H = (Math.atan2(b, a) * 180) / Math.PI
-  if (C < 1e-6) H = 0
-  else if (H < 0) H += 360
+  const [r0, g0, b0] = hexToRgb(hex)
+  return oklchFromRgb(r0, g0, b0)
+}
+
+/** 8-bit sRGB triple → OKLCH (for pixel loops — no hex round trip). */
+export function oklchFromRgb(r0: number, g0: number, b0: number): OkLCH {
+  const r = linearize(r0)
+  const g = linearize(g0)
+  const b = linearize(b0)
+  const l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+  const m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+  const s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+  const lp = cbrt(l)
+  const mp = cbrt(m)
+  const sp = cbrt(s)
+  const a = 1.9779984951 * lp - 2.428592205 * mp + 0.4505937099 * sp
+  const bb = 0.0259040371 * lp + 0.7827717662 * mp - 0.808675766 * sp
+  const L = 0.2104542553 * lp + 0.793617785 * mp - 0.0040720468 * sp
+  const C = Math.hypot(a, bb)
+  let H = 0
+  if (C >= 1e-6) {
+    H = (Math.atan2(bb, a) * 180) / Math.PI
+    if (H < 0) H += 360
+  }
   return { L, C, H }
 }
 

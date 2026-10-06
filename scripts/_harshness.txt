@@ -1,0 +1,50 @@
+/**
+ * scripts/_harshness.txt — harshness distribution probe (template).
+ *
+ * The driver replaces `__SEEDS__`. Per seed: full gated roll, final
+ * harshness + verdict codes + attempts + quench/soften rescues observed.
+ * Regression seeds (from bug screenshots) run first and are reported
+ * individually — they must never carry a `harsh` verdict.
+ */
+(() => {
+  const SEEDS = __SEEDS__
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const work = async () => {
+    const q = await import('/src/lib/quality.ts')
+    const rows = []
+    for (const seed of SEEDS) {
+      const seen = []
+      let res
+      try {
+        res = await q.randomProjectChecked(
+          seed,
+          { attempts: 8, budgetMs: 30000 },
+          () => {},
+          (x) =>
+            seen.push({
+              ok: x.verdict.ok,
+              harsh: +x.metrics.harshness.toFixed(2),
+              codes: x.verdict.hard.concat(x.verdict.soft).map((r) => r.code),
+            }),
+        )
+      } catch (e) {
+        rows.push({ seed, error: String((e && e.message) || e) })
+        continue
+      }
+      rows.push({
+        seed,
+        harsh: +res.metrics.harshness.toFixed(2),
+        finalOk: res.verdict.ok,
+        codes: res.verdict.hard.concat(res.verdict.soft).map((r) => r.code),
+        attempts: res.attempts,
+        firstHarsh: seen.length ? seen[0].harsh : null,
+        rescued: seen.length > 1,
+      })
+      await sleep(0)
+    }
+    return JSON.stringify({ rows })
+  }
+
+  return Promise.race([work(), sleep(290000).then(() => 'TIMEOUT-290s')])
+})()

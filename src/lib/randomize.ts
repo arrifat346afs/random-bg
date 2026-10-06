@@ -8,7 +8,8 @@
  */
 
 import { createRng, hash32, type RNG } from './rng'
-import { generatePalette, hexToRgb, PRESET_PALETTES, PALETTE_KEYS, type Harmony, type Palette } from './palette'
+import { generatePalette, hexToRgb, isPaletteLinked, PRESET_PALETTES, PALETTE_KEYS, type Harmony, type Palette } from './palette'
+import { oklchFromHex, capChroma, capYellow } from './field/oklab'
 import { GENERATORS, getGenerator, minCountFor, FAMILY_WEIGHTS } from './generators'
 import { createLayer, duplicateLayer, newId } from './project'
 import { defaultModifier } from './modifiers'
@@ -167,6 +168,51 @@ function brightnessBudget(layers: Layer[]): Layer[] {
     }
     return { ...l, params, opacity: Math.max(0.25, round3(l.opacity * k)) }
   })
+}
+
+/**
+ * One deterministic rescue pass for harsh saturated edges: halve outline
+ * strokes, dim flat normal-blend overlays, and leash palette chroma. Pure
+ * (a function of the project only) — see `randomProjectChecked`.
+ */
+export function softenHarsh(project: Project): Project {
+  const next: Project = structuredClone(project)
+  for (let i = 0; i < next.layers.length; i++) {
+    const l = next.layers[i]
+    const outline = l.params.outline
+    if (typeof outline === 'number' && outline > 0) {
+      l.params = { ...l.params, outline: outline * 0.5 }
+    }
+    if (i > 0 && l.blend === 'normal' && l.opacity > 0.6) {
+      l.opacity = Math.max(0.3, round3(l.opacity * 0.8))
+    }
+  }
+  capProjectChroma(next)
+  return next
+}
+
+/**
+ * Chroma discipline for dark grounds: no high-chroma colours sitting in the
+ * dark (they render as cheap neon edges), yellow hues extra-leashed. Applied
+ * to the project palette and every unlinked layer override; linked layers
+ * follow the project palette automatically.
+ */
+export function capProjectChroma(project: Project): void {
+  const tame = (colors: string[]): string[] =>
+    colors.map((c) => {
+      const lch = oklchFromHex(c)
+      let out = c
+      if (lch.C > 0.18 && lch.L < 0.5) out = capChroma(out, 0.18)
+      return capYellow(out, 0.12)
+    })
+  project.palette = { ...project.palette, colors: tame(project.palette.colors) }
+  for (const l of project.layers) {
+    if (isPaletteLinked(l.color)) {
+      l.color = { ...l.color, palette: { ...project.palette, colors: project.palette.colors.slice() } }
+    } else {
+      l.color = { ...l.color, palette: { ...l.color.palette, colors: tame(l.color.palette.colors) } }
+    }
+  }
 }
 
 /**
@@ -727,7 +773,7 @@ export function randomProject(seed?: number, opts: RandomProjectOpts = {}): Proj
   // extra from the RNG.
   const [pw, ph] = opts.canvas ? [opts.canvas.w, opts.canvas.h] : rng.pick(RANDOM_CANVAS_SIZES)
 
-  return {
+  const project: Project = {
     v: 1,
     name: randomProjectName(rng),
     canvas: {
@@ -747,6 +793,23 @@ export function randomProject(seed?: number, opts: RandomProjectOpts = {}): Proj
       speed: rng.range(0.6, 1.6),
     },
   }
+
+  // taste discipline, applied last so it sees the final ground. Pure value
+  // transforms (no RNG): existing seeds keep their shapes and palettes, only
+  // the harshest chroma and the flattest blobs-on-gradient get trimmed.
+  if (bg.kind !== 'transparent') {
+    const bgLuma =
+      bg.kind === 'gradient' ? (lumaOf(bg.from) + lumaOf(bg.to)) / 2 : lumaOf(bg.color)
+    if (bgLuma < 90) capProjectChroma(project)
+    if (bg.kind === 'gradient') {
+      // blob rule: flat opaque shapes over a gradient ground must stay sheer
+      for (let i = 1; i < project.layers.length; i++) {
+        const l = project.layers[i]
+        if (l.blend === 'normal' && l.opacity > 0.6) l.opacity = 0.6
+      }
+    }
+  }
+  return project
 }
 
 const NAME_A = ['Gold', 'Neon', 'Velvet', 'Ember', 'Aurora', 'Chrome', 'Solar', 'Midnight', 'Frost', 'Ruby', 'Cobalt', 'Amber', 'Iris', 'Onyx', 'Lumen', 'Nova']
