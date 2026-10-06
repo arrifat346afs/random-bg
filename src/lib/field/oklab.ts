@@ -163,3 +163,9 @@ export function remapLightness(hex: string, lo: number, hi: number, t: number): 
   const c = oklchFromHex(hex)
   return intoGamut({ ...c, L: Math.max(0, Math.min(1, lo + (hi - lo) * t)) })
 }
+
+/** Shift lightness by dL, staying in gamut (highlights, shaded feet). */
+export function shiftLightness(hex: string, dL: number): string {
+  const c = oklchFromHex(hex)
+  return intoGamut({ ...c, L: Math.max(0, Math.min(1, c.L + dL)) })
+}

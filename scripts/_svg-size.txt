@@ -1,0 +1,77 @@
+/**
+ * scripts/_svg-size.txt — SVG <image> embed sizes + scaled-view banding.
+ *
+ * Driven inline by `scripts/svg-size.ts`. Builds one flowWaves project at
+ * 1920x1080 and 3840x2160, reports SVG bytes, embedded PNG vs WebP bytes,
+ * and row-step banding when the SVG is viewed scaled (480px and 2x).
+ */
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const rowMaxStep = (canvas) => {
+    const d = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, canvas.width, canvas.height).data
+    const y = Math.floor(canvas.height * 0.55)
+    let prev = -1
+    let m = 0
+    for (let x = 0; x < canvas.width; x += 2) {
+      const o = (y * canvas.width + x) * 4
+      const L = 0.2126 * d[o] + 0.7152 * d[o + 1] + 0.0722 * d[o + 2]
+      if (prev >= 0) m = Math.max(m, Math.abs(L - prev))
+      prev = L
+    }
+    return +m.toFixed(1)
+  }
+
+  const work = async () => {
+    const [ex, cv, svc, gens, projM, attach] = await Promise.all([
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/canvas.ts'),
+      import('/src/lib/render/service.ts'),
+      import('/src/lib/generators/index.ts'),
+      import('/src/lib/project.ts'),
+      import('/src/lib/filters/attach.ts'),
+    ])
+    const byId = new Map(gens.GENERATORS.map((g) => [g.id, g]))
+    const def = byId.get('flowWaves')
+    const out = []
+    for (const [W, H] of [[1920, 1080], [3840, 2160]]) {
+      const project = projM.createProject({ seed: 4242, layers: [] })
+      project.canvas = { w: W, h: H, bg: { kind: 'solid', color: '#14101f' } }
+      project.palette = { name: 'custom', colors: ['#14101f', '#3a2a5e', '#7b5fc0', '#c9a8e8'] }
+      const layer = projM.createLayer('flowWaves', 4242)
+      layer.params = { ...def.defaults(), bands: 4 }
+      layer.color = { mode: 'palette', palette: { name: 'custom', colors: project.palette.colors.slice() }, ramp: 'linear', axis: 45, invert: false, linked: true }
+      layer.filters = []
+      project.layers = [layer]
+      const results = await svc.requestRender(project, () => {})
+      const { svg, ir, warnings } = ex.projectToSvg(project, results.results, {})
+      // embedded raster in PNG vs WebP bytes (same pixels, same scale)
+      const rc = document.createElement('canvas')
+      cv.renderCanvas(ir, rc, { scale: 1, background: project.canvas.bg, filters: attach.projectFilterOpts(project) })
+      const pngLen = rc.toDataURL('image/png').length
+      let webpLen = 0
+      try {
+        webpLen = rc.toDataURL('image/webp', 0.92).length
+      } catch { webpLen = -1 }
+      // scaled viewing: paint the SVG into <img> at 480px and at 2x canvas px
+      const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
+      const view = async (wPx) => {
+        const img = new Image()
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url })
+        const c = document.createElement('canvas')
+        c.width = wPx
+        c.height = Math.round(wPx * (H / W))
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height)
+        return rowMaxStep(c)
+      }
+      const small = await view(480)
+      const big = await view(Math.min(1920, W))
+      URL.revokeObjectURL(url)
+      out.push({ canvas: `${W}x${H}`, svgBytes: svg.length, pngB64: pngLen, webpB64: webpLen, warnings, view480: small, viewBig: big })
+      await sleep(0)
+    }
+    return JSON.stringify({ rows: out })
+  }
+
+  return Promise.race([work(), sleep(290000).then(() => 'TIMEOUT-290s')])
+})()

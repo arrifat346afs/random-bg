@@ -1,77 +1,149 @@
 /**
- * scripts/_wallpaper-sheet.txt — 8 Flow waves seeds at 4K, downsampled.
+ * scripts/_wallpaper-sheet.txt — wallpaper seeds at 4K, downsampled.
  *
- * Template: the driver replaces `__SEEDS__`. Each seed renders one flowWaves
- * layer (random params) at 3840x2160, measures white share + hue census +
- * row-step stats, and returns a 480px thumb.
+ * Template: the driver replaces `__GEN__` (generator id) and `__SEEDS__`.
+ * Each seed renders one wallpaper layer (random params) at 3840x2160 and
+ * reports: white share, hue census, full-row maxStep, MASKED maxStep (only
+ * over low-gradient samples — banding metric, shading edges excluded), and
+ * the worst 200x200 full-res crop (flattest block, 2x enlarged) for eye
+ * inspection.
+ *
+ * maxStep definition: maximum adjacent-pixel luminance step ΔL (0–255) along
+ * the middle gradient row at full render resolution. The masked variant only
+ * counts samples whose local gradient (3px radius) is < 2 LSB/px — legitimate
+ * shading edges (highlight lines, band feet) are excluded, so the number
+ * measures banding, not design.
  */
 (() => {
+  const GEN = __GEN__
   const SEEDS = __SEEDS__
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+  const hslOf = (r, g, b) => {
+    const mx = Math.max(r, g, b) / 255, mn = Math.min(r, g, b) / 255
+    const l = (mx + mn) / 2
+    let h = 0, s = 0
+    if (mx !== mn) {
+      const dd = mx - mn
+      s = l > 0.5 ? dd / (2 - mx - mn) : dd / (mx + mn)
+      if (mx === r / 255) h = ((g - b) / 255 / dd + (g < b ? 6 : 0)) * 60
+      else if (mx === g / 255) h = ((b - r) / 255 / dd + 2) * 60
+      else h = ((r - g) / 255 / dd + 4) * 60
+    }
+    return [h, s]
+  }
+
   const work = async () => {
-    const [rz, ex, cv, svc, pal, rngM, projM, attach] = await Promise.all([
+    const [rz, ex, cv, svc, rngM, projM, attach] = await Promise.all([
       import('/src/lib/randomize.ts'),
       import('/src/lib/export.ts'),
       import('/src/lib/render/canvas.ts'),
       import('/src/lib/render/service.ts'),
-      import('/src/lib/palette.ts'),
       import('/src/lib/rng.ts'),
       import('/src/lib/project.ts'),
       import('/src/lib/filters/attach.ts'),
     ])
+    const PALETTES = {
+      flowWaves: ['#14101f', '#3a2a5e', '#7b5fc0', '#c9a8e8'],
+      ribbonFlow: ['#04141f', '#032b3a', '#00c2a8', '#9fd0d8'],
+    }
     const rows = []
     const thumbs = []
+    const crops = []
     for (const seed of SEEDS) {
       const rng = rngM.createRng(seed)
-      const layer = rz.randomLayer({ genId: 'flowWaves', rng })
+      const layer = rz.randomLayer({ genId: GEN, rng })
       const project = projM.createProject({ seed, layers: [] })
       project.canvas = { w: 3840, h: 2160, bg: { kind: 'solid', color: '#0a0a10' } }
-      project.palette = { name: 'custom', colors: ['#14101f', '#3a2a5e', '#7b5fc0', '#c9a8e8'] }
-      layer.color = { mode: 'palette', palette: { name: 'custom', colors: project.palette.colors.slice() }, ramp: 'linear', axis: 45, invert: false, linked: true }
+      const pal = PALETTES[GEN] ?? ['#14101f', '#3a2a5e', '#7b5fc0', '#c9a8e8']
+      project.palette = { name: 'custom', colors: pal }
+      layer.color = { mode: 'palette', palette: { name: 'custom', colors: pal.slice() }, ramp: 'linear', axis: 45, invert: false, linked: true }
+      layer.filters = []
       project.layers = [layer]
       const out = await svc.requestRender(project, () => {})
       const ir = ex.compositeLayers(project, out.results)
       const c = document.createElement('canvas')
       cv.renderCanvas(ir, c, { scale: 1, background: project.canvas.bg, filters: attach.projectFilterOpts(project) })
-      const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height).data
-      // white share + hue census + row max-step (middle row, strided)
+      const W = c.width, H = c.height
+      const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data
+      const lumAt = (x, y) => {
+        const o = (y * W + x) * 4
+        return 0.2126 * d[o] + 0.7152 * d[o + 1] + 0.0722 * d[o + 2]
+      }
+
+      // strided luminance field (every 3rd px) for gradient + mask
+      const SW = Math.floor(W / 3), SH = Math.floor(H / 3)
+      const L = new Float32Array(SW * SH)
       let white = 0
       const hueHist = new Array(12).fill(0)
-      const y = Math.floor(c.height * 0.55)
-      let prev = -1
-      let maxStep = 0
-      for (let x = 0; x < c.width; x += 2) {
-        const o = (y * c.width + x) * 4
-        const r = d[o], g = d[o + 1], b = d[o + 2]
-        if (r >= 250 && g >= 250 && b >= 250) white++
-        const mx = Math.max(r, g, b) / 255, mn = Math.min(r, g, b) / 255
-        const l = (mx + mn) / 2
-        let h = 0, s = 0
-        if (mx !== mn) {
-          const dd = mx - mn
-          s = l > 0.5 ? dd / (2 - mx - mn) : dd / (mx + mn)
-          if (mx === r / 255) h = ((g - b) / 255 / dd + (g < b ? 6 : 0)) * 60
-          else if (mx === g / 255) h = ((b - r) / 255 / dd + 2) * 60
-          else h = ((r - g) / 255 / dd + 4) * 60
+      for (let gy = 0; gy < SH; gy++) {
+        for (let gx = 0; gx < SW; gx++) {
+          const x = gx * 3, y = gy * 3
+          const o = (y * W + x) * 4
+          const r = d[o], g = d[o + 1], b = d[o + 2]
+          L[gy * SW + gx] = 0.2126 * r + 0.7152 * g + 0.0722 * b
+          if (r >= 250 && g >= 250 && b >= 250) white++
+          const [h, s] = hslOf(r, g, b)
+          hueHist[Math.min(11, Math.floor((((h % 360) + 360) % 360) / 30))] += s
         }
-        hueHist[Math.min(11, Math.floor((((h % 360) + 360) % 360) / 30))] += s
-        const L = 0.2126 * r + 0.7152 * g + 0.0722 * b
-        if (prev >= 0) maxStep = Math.max(maxStep, Math.abs(L - prev))
-        prev = L
       }
-      const n = Math.ceil(c.width / 2)
+      const gradAt = (gx, gy) => {
+        const xm0 = L[gy * SW + Math.max(0, gx - 1)], xm1 = L[gy * SW + Math.min(SW - 1, gx + 1)]
+        const ym0 = L[Math.max(0, gy - 1) * SW + gx], ym1 = L[Math.min(SH - 1, gy + 1) * SW + gx]
+        return Math.abs(xm1 - xm0) + Math.abs(ym1 - ym0)
+      }
+      // full-row maxStep (middle row, strided) + masked (low-gradient only)
+      const midY = Math.floor(SH / 2)
+      let maxStep = 0, maskedMax = 0, maskedN = 0, totalN = 0
+      for (let gx = 1; gx < SW; gx++) {
+        const s = Math.abs(L[midY * SW + gx] - L[midY * SW + gx - 1])
+        totalN++
+        if (s > maxStep) maxStep = s
+        if (gradAt(gx, midY) < 2) {
+          maskedN++
+          if (s > maskedMax) maskedMax = s
+        }
+      }
+      const n = SW * SH
       let hueTotal = 0
       for (const v of hueHist) hueTotal += v
       let hues = 0
       for (const v of hueHist) if (hueTotal > 0 && v / hueTotal > 0.03) hues++
+
+      // worst crop: flattest 320px block with decent coverage → 200x200 @1x
+      const BW = 12, BH = 7
+      let best = null
+      for (let by = 0; by < BH; by++) {
+        for (let bx = 0; bx < BW; bx++) {
+          const x0 = Math.floor((bx / BW) * SW), x1 = Math.floor(((bx + 1) / BW) * SW)
+          const y0 = Math.floor((by / BH) * SH), y1 = Math.floor(((by + 1) / BH) * SH)
+          let gSum = 0, cnt = 0
+          for (let gy = y0; gy < y1; gy += 2) {
+            for (let gx = x0; gx < x1; gx += 2) {
+              gSum += gradAt(gx, gy)
+              cnt++
+            }
+          }
+          const mean = gSum / Math.max(1, cnt)
+          if (!best || mean < best.mean) best = { mean, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 }
+        }
+      }
+      const px = Math.max(100, Math.min(W - 100, Math.round(best.cx * 3)))
+      const py = Math.max(100, Math.min(H - 100, Math.round(best.cy * 3)))
+      const crop = document.createElement('canvas')
+      crop.width = 400
+      crop.height = 400
+      crop.getContext('2d').drawImage(c, px - 100, py - 100, 200, 200, 0, 0, 400, 400)
+
+      const p = layer.params
       rows.push({
         seed,
-        bands: layer.params.bands,
-        variant: layer.params.variant,
+        detail: GEN === 'flowWaves' ? `${p.bands}b/${p.variant}` : `${p.ribbons}r/${p.variant}`,
         white: +(white / n * 100).toFixed(2),
         hues,
         maxStep: +maxStep.toFixed(1),
+        maskedMax: +maskedMax.toFixed(1),
+        maskedCov: +(maskedN / Math.max(1, totalN) * 100).toFixed(0),
         nodes: out.count,
       })
       const t = document.createElement('canvas')
@@ -79,9 +151,10 @@
       t.height = 270
       t.getContext('2d').drawImage(c, 0, 0, 480, 270)
       thumbs.push({ seed, url: t.toDataURL('image/png') })
+      crops.push({ seed, url: crop.toDataURL('image/png') })
       await sleep(0)
     }
-    return JSON.stringify({ rows, thumbs })
+    return JSON.stringify({ rows, thumbs, crops })
   }
 
   return Promise.race([work(), sleep(290000).then(() => 'TIMEOUT-290s')])

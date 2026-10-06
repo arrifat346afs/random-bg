@@ -1,0 +1,28 @@
+/**
+ * scripts/_svg-dump.txt — return the 1920x1080 flowWaves SVG text for
+ * out-of-browser rendering (Inkscape column of the SVG test).
+ */
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const work = async () => {
+    const [ex, svc, gens, projM] = await Promise.all([
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/service.ts'),
+      import('/src/lib/generators/index.ts'),
+      import('/src/lib/project.ts'),
+    ])
+    const def = new Map(gens.GENERATORS.map((g) => [g.id, g])).get('flowWaves')
+    const project = projM.createProject({ seed: 4242, layers: [] })
+    project.canvas = { w: 1920, h: 1080, bg: { kind: 'solid', color: '#14101f' } }
+    project.palette = { name: 'custom', colors: ['#14101f', '#3a2a5e', '#7b5fc0', '#c9a8e8'] }
+    const layer = projM.createLayer('flowWaves', 4242)
+    layer.params = { ...def.defaults(), bands: 4 }
+    layer.color = { mode: 'palette', palette: { name: 'custom', colors: project.palette.colors.slice() }, ramp: 'linear', axis: 45, invert: false, linked: true }
+    layer.filters = []
+    project.layers = [layer]
+    const results = await svc.requestRender(project, () => {})
+    const { svg } = ex.projectToSvg(project, results.results, {})
+    return JSON.stringify({ svg })
+  }
+  return Promise.race([work(), sleep(120000).then(() => 'TIMEOUT-120s')])
+})()

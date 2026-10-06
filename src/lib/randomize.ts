@@ -424,14 +424,16 @@ export function randomLayer(opts: LayerSampleOpts): Layer {
   // 0–2 tasteful filters, drawn from a deliberately short safe list (grain, a
   // slight blur, a soft glow, small colour grades) — see `filters/random.ts`.
   // Without these a random project is a bit flat; with anything broader it stops
-  // being good work.
+  // being good work. Wallpaper fields compose clean: even "safe" grain would
+  // read as banding-test pollution and break the no-noise look.
   //
   // Forked off the layer seed rather than drawn from `rng`: the filter stack is a
   // *post-process*, so it must not steal draws from the stream that makes the
   // artwork. Drawing here inline silently re-rolled every shape, palette and
   // canvas size for every existing seed the first time filters landed.
-  layer.filters = randomFilterStack(rng.fork('filters', layerSeed))
+  layer.filters = getGenerator(genId)?.family === 'wallpaper' ? [] : randomFilterStack(rng.fork('filters', layerSeed))
   layer.filtersBypassed = false
+  tameWallpaper(layer)
   tameScatter(layer, rng.fork('tame', layerSeed), 0.8)
   tameRings(layer, rng.fork('rings', layerSeed))
   softenRays(layer, rng.fork('softrays', layerSeed))
@@ -455,6 +457,17 @@ function litScatter(layer: Layer): void {
     params.size = Math.max(params.size, 18)
   }
   layer.params = params
+}
+
+/**
+ * Light-variant wallpaper sits on a bright ground: additive blends have
+ * nowhere to go but white (a plus-lighter light layer measured 10.5% pure
+ * white), so they are always composited normally. Dark variants keep their
+ * rolled blend — glow needs something to add to.
+ */
+function tameWallpaper(layer: Layer): void {
+  if (getGenerator(layer.gen)?.family !== 'wallpaper') return
+  if (layer.params.variant === 'light') layer.blend = 'normal'
 }
 
 /**

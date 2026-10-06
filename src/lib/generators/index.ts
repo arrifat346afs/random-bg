@@ -30,6 +30,7 @@ import { gradShapesGen } from './gradient-shapes'
 import { mosaicGen } from './tile-mosaic'
 import { meshGen } from './mesh-gradient'
 import { flowWavesGen } from './wallpaper/flow-waves'
+import { ribbonFlowGen } from './wallpaper/ribbon-flow'
 
 /** Used when a project references a generator that no longer exists. */
 export const fallbackGenerator: GeneratorDef = {
@@ -61,6 +62,7 @@ export const GENERATORS: GeneratorDef[] = [
   mosaicGen,
   meshGen,
   flowWavesGen,
+  ribbonFlowGen,
 ]
 
 const byId = new Map<string, GeneratorDef>(GENERATORS.map((g) => [g.id, g]))

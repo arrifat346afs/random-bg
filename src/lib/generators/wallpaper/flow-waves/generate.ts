@@ -17,18 +17,14 @@ import type { GenContext, Params } from '../../../schema'
 import { done, int, num, str, emitStroke } from '../../kit'
 import { splineD, type Node } from '../../../ir'
 import { rankByLightness } from '../../../field/ramp'
-import { oklchFromHex, intoGamut, rampOklch, capChroma, capYellow } from '../../../field/oklab'
+import { oklchFromHex, intoGamut, rampOklch, capChroma, capYellow, shiftLightness } from '../../../field/oklab'
 
 /** Samples per band edge — dense enough that no facet survives the feather. */
 const EDGE_SAMPLES = 64
 /** Band path overshoot past the canvas edges (fraction of width). */
 const EDGE_MARGIN = 0.08
 
-/** Lighten/darken an OKLCH colour by dL, staying in gamut. */
-function shiftL(hex: string, dL: number): string {
-  const c = oklchFromHex(hex)
-  return intoGamut({ ...c, L: Math.max(0, Math.min(1, c.L + dL)) })
-}
+const shiftL = shiftLightness
 
 export function generateFlowWaves(p: Params, ctx: GenContext): ReturnType<typeof done> {
   const bands: number = Math.max(3, Math.min(5, int(p, 'bands', 4)))
@@ -89,9 +85,19 @@ export function generateFlowWaves(p: Params, ctx: GenContext): ReturnType<typeof
     }
     const outline = splineD([...top, ...bot], true, 0.5)
 
-    // calm OKLCH value ramp across the band: lit edge → body → shaded foot
-    const body = capYellow(capChroma(light ? shiftL(ranked[Math.min(ranked.length - 1, Math.floor(t * ranked.length))] ?? base, 0.18) : rampOklch(ranked, t), 0.22))
-    const litEdge = shiftL(body, light ? 0.06 : 0.12)
+    // calm OKLCH value ramp across the band: lit edge → body → shaded foot.
+    // Hard caps, not taste: the lit edge may sit at most 35% above the body
+    // (perceptual L), and light-variant bodies stop at L 0.92 so stacked
+    // overlaps can never flatten to white.
+    const rawBody = light
+      ? shiftL(ranked[Math.min(ranked.length - 1, Math.floor(t * ranked.length))] ?? base, 0.18)
+      : rampOklch(ranked, t)
+    const cappedBody = capYellow(capChroma(rawBody, 0.22))
+    const cappedLab = oklchFromHex(cappedBody)
+    const body = intoGamut({ ...cappedLab, L: light ? Math.min(cappedLab.L, 0.92) : cappedLab.L })
+    const litCap = Math.min(0.95, oklchFromHex(body).L * 1.35 + 0.02)
+    const litRaw = oklchFromHex(shiftL(body, light ? 0.06 : 0.12))
+    const litEdge = intoGamut({ ...litRaw, L: Math.min(litRaw.L, litCap) })
     const foot = shiftL(body, light ? -0.05 : -0.1)
     const midY = edgeY(w / 2) + th / 2
     nodes.push({

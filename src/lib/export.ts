@@ -108,16 +108,16 @@ export function projectToSvg(
   if (ir.stats.additive && opts.flattenAdditive) {
     warnings.push('`plus-lighter` was flattened to `screen` for renderer compatibility.')
   }
-  if (rasterLayers.length > 0) {
+  if (rasterFilterIds.length > 0) {
     warnings.push(
-      `${rasterLayers.length} layer${rasterLayers.length > 1 ? 's' : ''} with raster-only filter${rasterLayers.length > 1 ? 's' : ''} ` +
+      `${rasterFilterIds.length} layer${rasterFilterIds.length > 1 ? 's' : ''} with raster-only filter${rasterFilterIds.length > 1 ? 's' : ''} ` +
         'embedded as an image.',
     )
   }
   if (ditherIds.length > 0) {
     warnings.push(
       `${ditherIds.length} smooth-field layer${ditherIds.length > 1 ? 's' : ''} embedded as an image ` +
-        '(SVG vectors cannot carry anti-banding dither).',
+        '(SVG vectors cannot carry anti-banding dither; about 3 MB at 1080p and 11 MB at 4K as PNG, smooth when scaled).',
     )
   }
   return { svg, ir, warnings }
