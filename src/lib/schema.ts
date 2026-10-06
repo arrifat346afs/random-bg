@@ -201,10 +201,16 @@ export interface GeneratorDef<P extends Params = Params> {
   id: string
   name: string
   icon: string
-  family: 'particles' | 'light' | 'atmosphere' | 'geometry' | 'texture' | 'surface'
+  family: 'particles' | 'light' | 'atmosphere' | 'geometry' | 'texture' | 'surface' | 'wallpaper'
   tags: string[]
   description: string
   params: ParamDef[]
+  /**
+   * Smooth-field dithering: the layer rasterises offscreen (canvas) and
+   * embeds as `<image>` on SVG export so gradients never band. Vector-only
+   * generators leave this off and their output is untouched.
+   */
+  dither?: boolean
   defaults(): P
   /** expected primitive count — drives progress + caps */
   density(p: P): number

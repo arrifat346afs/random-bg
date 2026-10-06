@@ -8,6 +8,7 @@
  */
 
 import { hash32 } from '../rng'
+import { getGenerator } from '../generators'
 import type { Project } from '../schema'
 import type { FilterInstance } from './types'
 import { activeFilters, stackNeedsRaster } from './stack'
@@ -43,8 +44,24 @@ export function layerFilterSeeds(project: Project): (layerId: string) => number 
 export function projectFilterOpts(project: Project): {
   layerFilters: Record<string, FilterInstance[]>
   filterSeedOf: (layerId: string) => number
+  ditherLayers: ReadonlySet<string>
 } {
-  return { layerFilters: layerFilterMap(project), filterSeedOf: layerFilterSeeds(project) }
+  return {
+    layerFilters: layerFilterMap(project),
+    filterSeedOf: layerFilterSeeds(project),
+    ditherLayers: new Set(ditheredLayers(project)),
+  }
+}
+
+/**
+ * Layer ids whose generator declares smooth-field dithering. They rasterise
+ * offscreen on canvas (for the ±0.5 LSB triangular dither) and embed as
+ * `<image>` on SVG export, exactly like raster-only filter layers.
+ */
+export function ditheredLayers(project: Project): string[] {
+  return project.layers
+    .filter((l) => l.visible && getGenerator(l.gen)?.dither === true)
+    .map((l) => l.id)
 }
 
 /**

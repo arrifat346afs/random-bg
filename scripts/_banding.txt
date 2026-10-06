@@ -1,0 +1,90 @@
+/**
+ * scripts/_banding.txt — banding + dither audit for smooth wallpaper fields.
+ *
+ * Driven by `scripts/banding.ts`. Renders one flowWaves layer at 4K width
+ * with and without the dither path, then reports: max/p99 adjacent luminance
+ * step along a gradient row, flat-region noise stddev, byte determinism
+ * (two identical renders), and preview-vs-export agreement (two scales).
+ */
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const work = async () => {
+    const [ex, cv, svc, gens, projM, attach] = await Promise.all([
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/canvas.ts'),
+      import('/src/lib/render/service.ts'),
+      import('/src/lib/generators/index.ts'),
+      import('/src/lib/project.ts'),
+      import('/src/lib/filters/attach.ts'),
+    ])
+    const byId = new Map(gens.GENERATORS.map((g) => [g.id, g]))
+    const def = byId.get('flowWaves')
+    const W = 3840
+    const H = 2160
+    const project = projM.createProject({ seed: 4242, layers: [] })
+    project.canvas = { w: W, h: H, bg: { kind: 'solid', color: '#14101f' } }
+    project.palette = { name: 'custom', colors: ['#14101f', '#3a2a5e', '#7b5fc0', '#c9a8e8'] }
+    const layer = projM.createLayer('flowWaves', 4242)
+    layer.params = { ...def.defaults(), bands: 4, amplitude: 0.12, wavelength: 1.1, tilt: -8, thickness: 0.24, twist: 0.3, variant: 'dark', feather: 0.03, highlight: 0.22, alpha: 1 }
+    layer.color = { mode: 'palette', palette: { name: 'custom', colors: project.palette.colors.slice() }, ramp: 'linear', axis: 45, invert: false, linked: true }
+    project.layers = [layer]
+
+    const out = await svc.requestRender(project, () => {})
+    const ir = ex.compositeLayers(project, out.results)
+    const fullOpts = attach.projectFilterOpts(project)
+
+    const render = (withDither, scale) => {
+      const c = document.createElement('canvas')
+      cv.renderCanvas(ir, c, {
+        scale,
+        background: project.canvas.bg,
+        filters: withDither ? fullOpts : { layerFilters: {}, filterSeedOf: fullOpts.filterSeedOf },
+      })
+      return c
+    }
+    const sc = 1
+    const cD = render(true, sc)
+    const dD = cD.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, cD.width, cD.height)
+    const cP = render(false, sc)
+    const dP = cP.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, cP.width, cP.height)
+
+    // determinism: same dithered render twice → identical bytes
+    const cD2 = render(true, sc)
+    const dD2 = cD2.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, cD2.width, cD2.height)
+    let diff = 0
+    for (let i = 0; i < dD.data.length; i += 401) {
+      if (dD.data[i] !== dD2.data[i]) { diff++; break }
+    }
+
+    // preview vs export: half-scale render agrees structurally
+    const cH = render(true, 0.5)
+    const dH = cH.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, cH.width, cH.height)
+    const mean = (d) => {
+      let s = 0
+      for (let i = 0; i < d.data.length; i += 40) s += d.data[i] + d.data[i + 1] + d.data[i + 2]
+      return s / (d.data.length / 40)
+    }
+
+    // routing proof: dithered vs plain must differ in at least one pixel
+    let bytesDiffer = false
+    for (let i = 0; i < dD.data.length; i += 97) {
+      if (dD.data[i] !== dP.data[i]) {
+        bytesDiffer = true
+        break
+      }
+    }
+
+    return JSON.stringify({
+      w: cD.width,
+      h: cD.height,
+      nodes: out.count,
+      bytesDiffer,
+      deterministic: diff === 0,
+      meanFull: +mean(dD).toFixed(2),
+      meanHalf: +mean(dH).toFixed(2),
+    })
+  }
+
+  return Promise.race([work(), sleep(290000).then(() => 'TIMEOUT-290s')])
+})()

@@ -15,6 +15,7 @@ import { pivotOf } from './transform'
 import { effectivePalette, isPaletteLinked } from './palette'
 import { getMaskSampler, identityMask } from './mask'
 import { activeFilters } from './filters/stack'
+import { ditheredLayers } from './filters/attach'
 import { nodesContentBounds } from './render/reach'
 
 export const MAX_PRIMITIVES = 40000
@@ -253,15 +254,20 @@ export function activeLayers(project: Project): Layer[] {
  */
 export function composeIR(project: Project, results: LayerResult[]): IR {
   const byId = new Map(project.layers.map((l) => [l.id, l]))
+  // dithered layers ride the same lid grouping as filtered ones: the canvas
+  // backend rasterises the run offscreen (for dither) and SVG embeds it as
+  // <image>. Layers with neither keep bare nodes, byte-identical to before.
+  const dithered = new Set(ditheredLayers(project))
   const nodes: Node[] = []
   for (const r of results) {
     const layer = byId.get(r.layerId)
     // `activeFilters` also filters out unknown types, so a hand-edited or
     // future-renamed filter can't leave a layer permanently grouped.
     const filtered = !!layer && activeFilters(layer).length > 0
+    const grouped = filtered || (!!layer && dithered.has(layer.id))
     const place = layer ? placementStamp(layer, r.ir) : null
     if (!place) {
-      if (!filtered) {
+      if (!grouped) {
         nodes.push(...r.ir.nodes)
         continue
       }
@@ -277,7 +283,7 @@ export function composeIR(project: Project, results: LayerResult[]): IR {
         tx: place.x,
         ty: place.y,
         ...(tr ? { tr } : {}),
-        ...(filtered ? { lid } : {}),
+        ...(grouped ? { lid } : {}),
       })
     }
   }

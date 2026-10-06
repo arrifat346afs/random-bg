@@ -29,6 +29,7 @@ import { ribbonsGen } from './neon-ribbons'
 import { gradShapesGen } from './gradient-shapes'
 import { mosaicGen } from './tile-mosaic'
 import { meshGen } from './mesh-gradient'
+import { flowWavesGen } from './wallpaper/flow-waves'
 
 /** Used when a project references a generator that no longer exists. */
 export const fallbackGenerator: GeneratorDef = {
@@ -59,6 +60,7 @@ export const GENERATORS: GeneratorDef[] = [
   gradShapesGen,
   mosaicGen,
   meshGen,
+  flowWavesGen,
 ]
 
 const byId = new Map<string, GeneratorDef>(GENERATORS.map((g) => [g.id, g]))
@@ -103,7 +105,7 @@ export function generatorIds(): string[] {
 
 /** Generator ids grouped by family (used by the layer "add" menu). */
 export function generatorsByFamily(): { family: string; gens: GeneratorDef[] }[] {
-  const order = ['surface', 'particles', 'light', 'atmosphere', 'geometry', 'texture']
+  const order = ['wallpaper', 'surface', 'particles', 'light', 'atmosphere', 'geometry', 'texture']
   const map = new Map<string, GeneratorDef[]>()
   for (const g of GENERATORS) {
     const arr = map.get(g.family) ?? []
@@ -117,6 +119,7 @@ export function generatorsByFamily(): { family: string; gens: GeneratorDef[] }[]
 
 /** Families the randomiser draws from, with relative weights. */
 export const FAMILY_WEIGHTS: [string, number][] = [
+  ['wallpaper', 1.5],
   ['surface', 1],
   ['particles', 4],
   ['light', 3],

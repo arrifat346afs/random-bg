@@ -89,7 +89,7 @@ for (const def of PRESETS) {
 console.log(empty === 0 ? '  all presets render ✓' : `  ${empty} empty presets`)
 
 // Pinned preset ids: dropping or renaming a preset fails the build.
-// 38 originals + 8 ribbons + 3 gradient shapes + 4 mosaic + 2 mesh + 6 rays = 61.
+// 38 originals + 8 ribbons + 3 gradient shapes + 4 mosaic + 2 mesh + 6 rays + 4 flow = 65.
 const EXPECTED_PRESET_IDS = [
   'gold-dust', 'blue-glitter-bokeh', 'fire-embers', 'autumn-leaves-streak',
   'neon-purple-rails', 'sparkle-rain', 'silver-haze', 'sunrise-god-rays',
@@ -107,6 +107,7 @@ const EXPECTED_PRESET_IDS = [
   'coral-triangles', 'teal-navy-mosaic', 'mono-lowpoly', 'pastel-mosaic',
   'aurora-mesh', 'rose-mesh',
   'cathedral-rays', 'sunrise-burst', 'caustic-shafts', 'neon-fan', 'spotlight-cone', 'anamorphic-horizon',
+  'dusk-waves', 'graphite-flow', 'coral-tide', 'forest-mist',
 ]
 let presetIdFailures = 0
 {
@@ -139,7 +140,7 @@ let gateFailures = 0
     }
     return false
   }
-  for (const genId of ['ribbons', 'gradShapes', 'mosaic', 'mesh']) {
+  for (const genId of ['ribbons', 'gradShapes', 'mosaic', 'mesh', 'flowWaves']) {
     const gen = getGenerator(genId)
     if (!gen) {
       gateFailures++

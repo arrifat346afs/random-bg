@@ -1,5 +1,5 @@
 /**
- * presets.ts — 61 built-in projects (38 originals + 23 new).
+ * presets.ts — 65 built-in projects (38 originals + 27 new).
  *
  * A preset is nothing special in the data model: it is just a parameter set
  * for the same composable system, which proves the "named effects are only
@@ -15,6 +15,7 @@ import { GRADIENT_SHAPES_PRESETS } from './generators/gradient-shapes/presets'
 import { MOSAIC_PRESETS } from './generators/tile-mosaic/presets'
 import { MESH_PRESETS } from './generators/mesh-gradient/presets'
 import { RAY_PRESETS } from './generators/rays/presets'
+import { FLOW_WAVE_PRESETS } from './generators/wallpaper/flow-waves/presets'
 import type {
   BackgroundSpec,
   BlendMode,
@@ -1177,6 +1178,15 @@ export const PRESETS: PresetDef[] = [
     seed: r.seed,
     bg: r.bg,
     layers: r.layers,
+  })),
+  ...FLOW_WAVE_PRESETS.map((r): PresetDef => ({
+    id: r.id,
+    name: r.name,
+    tags: r.tags,
+    description: r.description,
+    seed: r.seed,
+    bg: r.bg,
+    layers: [r.layer],
   })),
 ]
 

@@ -574,7 +574,8 @@ export function pickRuled(
   for (let tries = 0; tries < 8; tries++) {
     let id: string
     if (isBase && rng.next() < SURFACE_BASE_CHANCE) {
-      const pool = GENERATORS.filter((g) => g.family === 'surface')
+      // calm bases: surface fields and wallpaper flows carry the base layer
+      const pool = GENERATORS.filter((g) => g.family === 'surface' || g.family === 'wallpaper')
       id = pool.length ? rng.weighted(pool, pool.map((g) => genMult(g.id))).id : pickGenerator(rng)
     } else {
       id = pickGenerator(rng)

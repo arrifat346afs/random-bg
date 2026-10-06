@@ -26,6 +26,7 @@ import {
 } from './reach'
 import { growRect, padRect, rectArea, type Rect } from './bounds'
 import { drawSvgPath } from './path'
+import { triangularDither } from './dither'
 import { stampMatrix } from '../transform'
 import {
   SURFACE_PX_CEILING,
@@ -293,6 +294,8 @@ export interface DrawOpts {
   layerFilters?: Record<string, FilterInstance[]>
   /** per-layer deterministic seed for noise filters (see `filters/kit.ts`) */
   filterSeedOf?: (layerId: string) => number
+  /** layer ids whose offscreen raster gets triangular dither (see FilterRenderOpts) */
+  ditherLayers?: ReadonlySet<string>
 }
 
 /* ---- Blurred-run batching ------------------------------------------------ */
@@ -385,6 +388,7 @@ function makeOpts(
     px: Math.hypot(t.a, t.b) || 1,
     layerFilters: filters?.layerFilters,
     filterSeedOf: filters?.filterSeedOf,
+    ditherLayers: filters?.ditherLayers,
   }
 }
 
@@ -392,6 +396,12 @@ function makeOpts(
 export interface FilterRenderOpts {
   layerFilters?: Record<string, FilterInstance[]>
   filterSeedOf?: (layerId: string) => number
+  /**
+   * Layer ids whose offscreen raster gets deterministic triangular dither
+   * (smooth wallpaper fields). Present-but-unfiltered layers still route
+   * offscreen; absent layers draw direct, exactly as before.
+   */
+  ditherLayers?: ReadonlySet<string>
 }
 
 /** `blur()` in device px that reproduces SVG's `stdDeviation` in user units. */
@@ -473,10 +483,13 @@ export function drawNodes(
 
     const lid = nodes[i].lid
     const filters = lid ? o.layerFilters?.[lid] : undefined
-    if (lid && filters && filters.length > 0) {
+    const dither = lid ? o.ditherLayers?.has(lid) === true : false
+    if (lid && ((filters && filters.length > 0) || dither)) {
       // The whole run is one layer's geometry. Rasterise it offscreen and
       // filter as a unit — the same thing SVG does with `<g filter>`.
-      drawFilteredRun(ctx, nodes, i, end, filters, o)
+      // Dither-only layers (no filter stack) take the same offscreen road so
+      // the ±0.5 LSB triangular dither lands on final pixels, once.
+      drawFilteredRun(ctx, nodes, i, end, filters ?? [], o, dither ? (o.filterSeedOf?.(lid) ?? 0) : null)
       if (place) ctx.restore()
       i = end
       continue
@@ -598,6 +611,7 @@ function drawFilteredRun(
   j: number,
   filters: FilterInstance[],
   o: DrawOpts,
+  ditherSeed: number | null,
 ): void {
   const t = ctx.getTransform()
   const cw = ctx.canvas.width
@@ -658,10 +672,10 @@ function drawFilteredRun(
     // The nested draw must not re-arm the global pixel budget, or a layer with
     // a filter stack would get a fresh one and blow the ceiling.
     const budget = filterPxLeft
-    drawNodes(sx, unplaced, { ...o, skipBlur: false, layerFilters: undefined })
+    drawNodes(sx, unplaced, { ...o, skipBlur: false, layerFilters: undefined, ditherLayers: undefined })
     filterPxLeft = budget
 
-    const filtered = applyOffscreen(s, w, h, filters, nodes[i].lid ?? '', o)
+    const filtered = applyOffscreen(s, w, h, filters, nodes[i].lid ?? '', o, ditherSeed)
 
     ctx.save()
     ctx.setTransform(1, 0, 0, 1, 0, 0)
@@ -686,6 +700,7 @@ function applyOffscreen(
   filters: FilterInstance[],
   lid: string,
   o: DrawOpts,
+  ditherSeed: number | null,
 ): HTMLCanvasElement {
   const sx = s.x
   if (!sx) return s.c
@@ -693,6 +708,8 @@ function applyOffscreen(
   const seed = o.filterSeedOf?.(lid) ?? 0
   const out = applyFilterStack(img.data, w, h, filters, seed)
   img.data.set(out)
+  // dither lands on final pixels, once, after every filter
+  if (ditherSeed !== null) triangularDither(img.data, w, h, ditherSeed)
   sx.setTransform(1, 0, 0, 1, 0, 0)
   sx.putImageData(img, 0, 0)
   return s.c
@@ -711,7 +728,7 @@ function drawRunPlain(
   j: number,
   o: DrawOpts,
 ): void {
-  const inner: DrawOpts = { ...o, layerFilters: undefined }
+  const inner: DrawOpts = { ...o, layerFilters: undefined, ditherLayers: undefined }
   for (let k = i; k < j; k++) drawNode(ctx, nodes[k], inner)
 }
 

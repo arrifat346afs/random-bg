@@ -12,7 +12,7 @@ import { buildIR } from './ir'
 import { composeIR, type LayerResult } from './pipeline'
 import { renderCanvas, applyMotion, drawBackground, irToCanvas } from './render/canvas'
 import { renderSVG, type SvgRenderOpts } from './render/svg'
-import { projectFilterOpts, rasterFilteredLayers } from './filters/attach'
+import { projectFilterOpts, rasterFilteredLayers, ditheredLayers } from './filters/attach'
 import type { BackgroundSpec, Project } from './schema'
 
 export type RasterFormat = 'png' | 'jpg' | 'webp'
@@ -85,14 +85,24 @@ export function projectToSvg(
   opts: Partial<SvgRenderOpts> = {},
 ): { svg: string; ir: IR; warnings: string[] } {
   const ir = compositeLayers(project, results)
-  const rasterLayers = rasterFilteredLayers(project)
+  const rasterFilterIds = rasterFilteredLayers(project)
+  const ditherIds = ditheredLayers(project)
+  const rasterLayers = [...new Set([...rasterFilterIds, ...ditherIds])]
+  const scale = opts.scale && Number.isFinite(opts.scale) && opts.scale > 0 ? opts.scale : 1
+  // `exportProject` passes `background: undefined` when "include background" is
+  // off. `'background' in opts` distinguishes that from older callers that pass
+  // `{}` and still expect the canvas background.
+  const background = 'background' in opts ? opts.background : project.canvas.bg
   const svg = renderSVG(ir, {
-    background: project.canvas.bg,
+    background,
     flattenAdditive: opts.flattenAdditive,
     decimals: opts.decimals ?? 2,
     viewboxOnly: opts.viewboxOnly,
+    scale,
     layerFilters: projectFilterOpts(project).layerFilters,
-    rasterImages: rasterLayers.length ? rasterLayerImages(ir, project, rasterLayers) : undefined,
+    rasterImages: rasterLayers.length
+      ? rasterLayerImages(ir, project, rasterLayers, scale)
+      : undefined,
   })
   const warnings: string[] = []
   if (ir.stats.additive && opts.flattenAdditive) {
@@ -102,6 +112,12 @@ export function projectToSvg(
     warnings.push(
       `${rasterLayers.length} layer${rasterLayers.length > 1 ? 's' : ''} with raster-only filter${rasterLayers.length > 1 ? 's' : ''} ` +
         'embedded as an image.',
+    )
+  }
+  if (ditherIds.length > 0) {
+    warnings.push(
+      `${ditherIds.length} smooth-field layer${ditherIds.length > 1 ? 's' : ''} embedded as an image ` +
+        '(SVG vectors cannot carry anti-banding dither).',
     )
   }
   return { svg, ir, warnings }
@@ -121,16 +137,23 @@ function rasterLayerImages(
   ir: IR,
   project: Project,
   layerIds: string[],
+  scale = 1,
 ): Record<string, string> {
   if (typeof document === 'undefined') return {}
   const { layerFilters, filterSeedOf } = projectFilterOpts(project)
+  const dither = new Set(ditheredLayers(project))
   const out: Record<string, string> = {}
   for (const layerId of layerIds) {
     const nodes = ir.nodes.filter((n) => n.lid === layerId)
     if (nodes.length === 0) continue
     try {
       const canvas = irToCanvas(buildIR(ir.w, ir.h, nodes), {
-        filters: { layerFilters: { [layerId]: layerFilters[layerId] ?? [] }, filterSeedOf },
+        scale,
+        filters: {
+          layerFilters: { [layerId]: layerFilters[layerId] ?? [] },
+          filterSeedOf,
+          ditherLayers: dither.has(layerId) ? new Set([layerId]) : undefined,
+        },
       })
       out[layerId] = canvas.toDataURL('image/png')
     } catch {
@@ -162,18 +185,24 @@ export async function exportProject(
   }
 
   if (opts.format === 'svg') {
+    const svgScale =
+      opts.scale && Number.isFinite(opts.scale) && opts.scale > 0 ? opts.scale : 1
     const { svg, ir, warnings } = projectToSvg(project, results, {
       flattenAdditive: opts.flattenAdditive,
       // SVG always carries its own background rect when requested
       background: bg,
+      scale: svgScale,
     })
+    const width = Math.max(1, Math.round(ir.w * svgScale))
+    const height = Math.max(1, Math.round(ir.h * svgScale))
+    const suffix = svgScale !== 1 ? `@${formatScale(svgScale)}x` : ''
     return {
       format: 'svg',
       svg,
       bytes: new Blob([svg], { type: 'image/svg+xml' }).size,
-      width: ir.w,
-      height: ir.h,
-      filename: `${base}.svg`,
+      width,
+      height,
+      filename: `${base}${suffix}.svg`,
       warnings,
     }
   }
