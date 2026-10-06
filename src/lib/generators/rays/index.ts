@@ -2,10 +2,11 @@
  * Light rays, god rays, lens flares and anamorphic streaks.
  */
 
-import type { GeneratorDef } from '../schema'
-import { sampleDistribution } from '../dist'
-import { circle, glowPaint, type Node, type Paint } from '../ir'
-import { colorOf, done, emitCount, int, num, str } from './kit'
+import type { GeneratorDef, GenContext, Params } from '../../schema'
+import { sampleDistribution } from '../../dist'
+import { circle, glowPaint, type IR, type Node, type Paint } from '../../ir'
+import { hexToHsl, hslToHex } from '../../palette'
+import { colorOf, done, emitCount, int, num, str } from '../kit'
 
 const MODES = [
   { value: 'godRays', label: 'God rays' },
@@ -23,6 +24,18 @@ export const raysGen: GeneratorDef = {
   description: 'Shafts of light, camera flare ghosts and horizontal blue streaks.',
   params: [
     { key: 'mode', label: 'Type', type: 'enum', options: MODES, default: 'godRays', section: 'shape' },
+    {
+      key: 'style',
+      label: 'Style',
+      type: 'enum',
+      options: [
+        { value: 'classic', label: 'Classic (hard beams)' },
+        { value: 'soft', label: 'Soft volumetric' },
+      ],
+      default: 'classic',
+      section: 'shape',
+      hint: 'Soft rebuilds beams as feathered volumetric wedges; classic keeps the original hard polygons byte-identical.',
+    },
     {
       key: 'count',
       label: 'Rays',
@@ -156,9 +169,21 @@ export const raysGen: GeneratorDef = {
       default: 0.75,
       section: 'style',
     },
+    {
+      key: 'dust',
+      label: 'Dust motes',
+      type: 'float',
+      min: 0,
+      max: 1,
+      step: 0.01,
+      default: 0.35,
+      section: 'style',
+      hint: 'Tiny soft motes drifting in the beams (soft style only).',
+    },
   ],
   defaults: () => ({
     mode: 'godRays',
+    style: 'classic',
     count: 26,
     origin: 'distribution',
     angle: 0,
@@ -171,9 +196,18 @@ export const raysGen: GeneratorDef = {
     coreSize: 0.45,
     jitter: 0.55,
     alpha: 0.75,
+    dust: 0.35,
   }),
-  density: (p) => num(p, 'count', 26) * 4 + num(p, 'ghosts', 5) * 3,
+  density: (p) => {
+    const base = num(p, 'count', 26) * 4 + num(p, 'ghosts', 5) * 3
+    // soft beams render as 3 nested feather passes plus dust motes
+    if (str(p, 'style', 'classic') === 'soft') {
+      return base * 3.2 + num(p, 'dust', 0.35) * num(p, 'count', 26) * 3
+    }
+    return base
+  },
   generate(p, ctx) {
+    if (str(p, 'style', 'classic') === 'soft') return generateSoft(p, ctx)
     const mode = str(p, 'mode', 'godRays')
     // flares / hero rays: one ray is the point — exempt from MIN_EMIT
     const count = emitCount(p, 26, 1)
@@ -430,4 +464,215 @@ function ringPaint(x: number, y: number, r: number, c: string, a: number): Paint
       { t: 1, c, o: 0 },
     ],
   }
+}
+
+/** Lift a colour toward white by t (0..1) for warm beam hearts. */
+function lift(c: string, t: number): string {
+  if (!c.startsWith('#')) return c
+  const [h, s, l] = hexToHsl(c)
+  return hslToHex(h, Math.max(0, s - t * 30), Math.min(96, l + t * 55))
+}
+
+/** Wedge polygon points (not closed) for one beam pass. */
+function beamOutline(
+  x: number,
+  y: number,
+  a: number,
+  len: number,
+  width: number,
+  taper: number,
+  samples: number,
+): number[] {
+  const dx = Math.cos(a)
+  const dy = Math.sin(a)
+  const nx = -dy
+  const ny = dx
+  const left: number[] = []
+  const right: number[] = []
+  for (let i = 0; i <= samples; i++) {
+    const t = i / samples
+    const hw = (width / 2) * Math.pow(1 - t, taper)
+    const px = x + dx * len * t
+    const py = y + dy * len * t
+    left.push(px + nx * hw, py + ny * hw)
+    right.push(px - nx * hw, py - ny * hw)
+  }
+  right.reverse()
+  return [...left, ...right]
+}
+
+function beamPath(pts: number[]): string {
+  let d = `M${pts[0].toFixed(2)} ${pts[1].toFixed(2)}`
+  for (let i = 2; i < pts.length; i += 2) d += `L${pts[i].toFixed(2)} ${pts[i + 1].toFixed(2)}`
+  return d + 'Z'
+}
+
+/**
+ * One feathered beam: three nested wedges (wide faint → narrow bright) with
+ * an exp-like along-beam falloff and a warm heart cooling to the palette
+ * colour. The nesting synthesises the angular gaussian a single vector fill
+ * cannot express, so edges feather instead of cutting.
+ */
+function pushSoftBeam(
+  nodes: Node[],
+  x: number,
+  y: number,
+  a: number,
+  len: number,
+  width: number,
+  taper: number,
+  c: string,
+  alpha: number,
+): void {
+  if (alpha <= 0.004 || len <= 1) return
+  const tipX = x + Math.cos(a) * len
+  const tipY = y + Math.sin(a) * len
+  const heart = lift(c, 0.32)
+  const passes: Array<[number, number]> = [
+    [1, 0.3],
+    [0.62, 0.45],
+    [0.34, 0.6],
+  ]
+  for (const [wScale, aScale] of passes) {
+    const pts = beamOutline(x, y, a, len, Math.max(0.5, width * wScale), taper, 14)
+    const o = alpha * aScale
+    nodes.push({
+      g: { k: 'path', d: beamPath(pts) },
+      fill: {
+        k: 'linear',
+        x1: x,
+        y1: y,
+        x2: tipX,
+        y2: tipY,
+        stops: [
+          { t: 0, c: heart, o },
+          { t: 0.25, c: heart, o: o * 0.55 },
+          { t: 0.5, c, o: o * 0.28 },
+          { t: 0.75, c, o: o * 0.12 },
+          { t: 1, c, o: 0 },
+        ],
+      },
+      op: 1,
+      blend: 'plus-lighter',
+    })
+  }
+}
+
+/**
+ * Soft volumetric light: one source, energy-normalised feathered beams,
+ * warm heart with white only at the very centre, optional dust motes.
+ * Same params as classic; `dust` is honoured here only.
+ */
+function generateSoft(p: Params, ctx: GenContext): IR {
+  const mode = str(p, 'mode', 'godRays')
+  const count = emitCount(p, 26, 1)
+  const angle0 = (num(p, 'angle', 0) * Math.PI) / 180
+  const spread = (num(p, 'spread', 180) * Math.PI) / 180
+  const length = num(p, 'length', 0.85) * Math.hypot(ctx.w, ctx.h)
+  const width = num(p, 'width', 16)
+  const taper = num(p, 'taper', 0.75)
+  const intensity = num(p, 'intensity', 0.6)
+  const alpha = num(p, 'alpha', 0.75)
+  const jitter = num(p, 'jitter', 0.55)
+  const coreSize = num(p, 'coreSize', 0.45)
+  const origin = str(p, 'origin', 'distribution')
+  const dust = Math.max(0, Math.min(1, num(p, 'dust', 0.35)))
+  const nodes: Node[] = []
+
+  // one light source, on- or off-canvas
+  const probe = sampleDistribution(ctx, 1)[0] ?? { x: ctx.w / 2, y: ctx.h * 0.2 }
+  const sx = origin === 'center' ? ctx.w / 2 : origin === 'corner' ? ctx.w * 0.06 : probe.x
+  const sy = origin === 'center' ? ctx.h / 2 : origin === 'corner' ? ctx.h * 0.08 : probe.y
+  const srcColor = colorOf(ctx, { x: sx, y: sy, z: 0.5, t: 0.5, edge: 0, mask: 1 }, 0.5)
+
+  // overlapping beams add light but never saturate: a fixed total beam
+  // energy budget shared across a SMALL number of shafts (real god-rays are
+  // a handful of shafts, not fifty). Counts stay backward compatible —
+  // classic ignores this cap entirely.
+  const rawN = mode === 'starburst' ? Math.max(8, count) : count
+  const n = Math.max(3, Math.min(mode === 'anamorphic' ? 8 : 16, Math.round(rawN / 3)))
+  const beamBudget = 1.2 / Math.max(1, n)
+  const beamAlpha = alpha * intensity * beamBudget
+
+  // source: broad palette glow, warm heart, pinprick white centre only.
+  // All three stack plus-lighter on the same pixels, so the stack is
+  // explicitly budgeted to stay under 1.0 — the source must glow, never flood.
+  const r = Math.max(6, Math.min(ctx.w, ctx.h) * 0.12 * Math.max(0.15, coreSize))
+  nodes.push(circle(sx, sy, r * 2.6, glowPaint(sx, sy, r * 2.6, srcColor, alpha * 0.25), { blend: 'plus-lighter', op: 1 }))
+  nodes.push(circle(sx, sy, r * 0.9, glowPaint(sx, sy, r * 0.9, lift(srcColor, 0.35), alpha * 0.3), { blend: 'plus-lighter', op: 1 }))
+  const pinR = Math.max(2, r * 0.1)
+  nodes.push(circle(sx, sy, pinR, glowPaint(sx, sy, pinR, '#ffffff', alpha * 0.3), { blend: 'plus-lighter', op: 1 }))
+
+  const beamAngles: number[] = []
+  const beamLens: number[] = []
+  for (let i = 0; i < n; i++) {
+    const a =
+      mode === 'starburst' || mode === 'flare'
+        ? angle0 + (i / Math.max(1, n)) * Math.PI * 2 + ctx.rng.normal(0, 0.05)
+        : angle0 + ((i + 0.5) / Math.max(1, n) - 0.5) * spread + ctx.rng.normal(0, spread * 0.04)
+    const len = length * ctx.rng.range(1 - jitter * 0.7, 1 + jitter * 0.7)
+    // log-normal widths: mostly slim shafts, occasional broad wash
+    const w = Math.max(1, width * Math.exp(ctx.rng.normal(0, 0.45)))
+    const c = colorOf(ctx, { x: sx, y: sy, z: 0.5, t: n > 1 ? i / (n - 1) : 0.5, edge: 0, mask: 1 }, i / Math.max(1, n))
+    pushSoftBeam(nodes, sx, sy, a, len, w, taper, c, beamAlpha)
+    beamAngles.push(a)
+    beamLens.push(len)
+  }
+
+  // flare ghosts ride the centre line at reduced energy (already-soft shapes)
+  if (mode === 'flare') {
+    const ghosts = int(p, 'ghosts', 5)
+    const cx = ctx.w / 2
+    const cy = ctx.h / 2
+    for (let i = 1; i <= ghosts; i++) {
+      const t = (i / (ghosts + 1)) * 1.8 - 0.4
+      const gx = sx + (cx - sx) * 2 * t
+      const gy = sy + (cy - sy) * 2 * t
+      const rr = Math.max(3, r * (0.2 + ctx.rng.range(0, 0.75)))
+      const gc = i % 3 === 0 ? '#8ef0ff' : i % 3 === 1 ? srcColor : '#ffd9a0'
+      nodes.push(
+        i % 2 === 0
+          ? { g: { k: 'circle', x: gx, y: gy, r: rr }, fill: ringPaint(gx, gy, rr, gc, alpha * 0.25), op: 1, blend: 'screen' as const }
+          : circle(gx, gy, rr, glowPaint(gx, gy, rr, gc, alpha * 0.22), { blend: 'screen', op: 1 }),
+      )
+    }
+  }
+
+  // anamorphic keeps its soft bar, at capped energy and no white
+  if (mode === 'anamorphic') {
+    const w = ctx.w * 0.92
+    const h = Math.max(2, width * 2.2)
+    nodes.push({
+      g: { k: 'rect', x: sx - w / 2, y: sy - h / 2, w, h },
+      fill: {
+        k: 'radial',
+        cx: sx,
+        cy: sy,
+        r: w / 2,
+        stops: [
+          { t: 0, c: srcColor, o: alpha * 0.38 },
+          { t: 0.12, c: srcColor, o: alpha * 0.26 },
+          { t: 0.45, c: srcColor, o: alpha * 0.08 },
+          { t: 1, c: srcColor, o: 0 },
+        ],
+      },
+      blend: 'plus-lighter',
+      op: 1,
+    })
+  }
+
+  // dust motes lit by the beams
+  const motes = Math.round(dust * n * 3)
+  for (let i = 0; i < motes; i++) {
+    const b = Math.floor(ctx.rng.next() * Math.max(1, beamAngles.length))
+    const a = beamAngles[b] ?? angle0
+    const len = beamLens[b] ?? length
+    const d = Math.pow(ctx.rng.next(), 1.5) * len
+    const px = sx + Math.cos(a) * d + ctx.rng.normal(0, width * 0.5)
+    const py = sy + Math.sin(a) * d + ctx.rng.normal(0, width * 0.5)
+    const mr = ctx.rng.range(1, 3)
+    nodes.push(circle(px, py, mr * 2.4, glowPaint(px, py, mr * 2.4, lift(srcColor, 0.4), 0.3 * beamBudget + 0.06), { blend: 'plus-lighter', op: 1 }))
+  }
+
+  return done(ctx.w, ctx.h, nodes)
 }

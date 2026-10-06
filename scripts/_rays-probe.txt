@@ -1,0 +1,103 @@
+/**
+ * scripts/_rays-probe.txt — rays generator white + edge audit.
+ *
+ * Driven by `scripts/rays-white.ts`. Renders 100 single-layer rays projects
+ * (style forced to `soft`) plus 10 `classic` contrast samples at 256 px and
+ * returns composite white share, largest white region, max 1px luminance
+ * step, and 12 soft thumbs for review.
+ */
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const work = async () => {
+    const [rz, q, ex, cv, svc] = await Promise.all([
+      import('/src/lib/randomize.ts'),
+      import('/src/lib/quality.ts'),
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/canvas.ts'),
+      import('/src/lib/render/service.ts'),
+    ])
+
+    const DARK = { kind: 'solid', color: '#0a0a10' }
+    const mkProject = (layer) => ({
+      v: 1,
+      name: 'rayprobe',
+      canvas: { w: 1080, h: 1080, bg: DARK },
+      seed: layer.seedOffset,
+      palette: { name: 'custom', colors: ['#e9fff9', '#7cf5c4', '#00c2a8', '#032b3a'] },
+      layers: [layer],
+      groups: [],
+      motion: { drift: 0, twinkle: 0, pulse: 0, flow: 0, speed: 1 },
+    })
+
+    // max 1px luminance step over the composite (hard polygon edges spike it)
+    const maxStep = async (project) => {
+      const out = await svc.requestRender(project, () => {})
+      const ir = ex.compositeLayers(project, out.results)
+      const sc = 256 / Math.max(1, ir.w)
+      const c = document.createElement('canvas')
+      cv.renderCanvas(ir, c, { scale: sc, background: DARK })
+      const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height).data
+      const lumAt = (x, y) => {
+        const o = (y * c.width + x) * 4
+        return 0.2126 * d[o] + 0.7152 * d[o + 1] + 0.0722 * d[o + 2]
+      }
+      let m = 0
+      for (let y = 0; y < c.height; y += 1) {
+        for (let x = 0; x < c.width - 1; x += 1) {
+          m = Math.max(m, Math.abs(lumAt(x, y) - lumAt(x + 1, y)))
+        }
+      }
+      return { step: +m.toFixed(1), ir, out }
+    }
+
+    const soft = []
+    for (let s = 1; s <= 100; s++) {
+      const rng = (await import('/src/lib/rng.ts')).createRng(9000 + s)
+      const layer = rz.randomLayer({ genId: 'rays', rng })
+      layer.params = { ...layer.params, style: 'soft' }
+      layer.blend = 'screen'
+      const project = mkProject(layer)
+      const out = await svc.requestRender(project, () => {})
+      const metrics = q.measureProject(project, out.results)
+      soft.push({
+        seed: 9000 + s,
+        white: +metrics.whiteComposite.toFixed(2),
+        region: +metrics.whiteRegion.toFixed(2),
+        gens: layer.gen,
+        mode: layer.params.mode,
+      })
+      await sleep(0)
+    }
+
+    const classicSteps = []
+    for (let s = 1; s <= 10; s++) {
+      const rng = (await import('/src/lib/rng.ts')).createRng(7000 + s)
+      const layer = rz.randomLayer({ genId: 'rays', rng })
+      layer.params = { ...layer.params, style: 'classic' }
+      const { step } = await maxStep(mkProject(layer))
+      classicSteps.push(step)
+      await sleep(0)
+    }
+
+    const softSteps = []
+    const thumbs = []
+    for (let s = 1; s <= 12; s++) {
+      const rng = (await import('/src/lib/rng.ts')).createRng(5000 + s)
+      const layer = rz.randomLayer({ genId: 'rays', rng })
+      layer.params = { ...layer.params, style: 'soft' }
+      const project = mkProject(layer)
+      const { step, ir } = await maxStep(project)
+      softSteps.push(step)
+      const tw = 300
+      const c = document.createElement('canvas')
+      cv.renderCanvas(ir, c, { scale: tw / ir.w })
+      thumbs.push({ seed: 5000 + s, mode: layer.params.mode, step, url: c.toDataURL('image/png') })
+      await sleep(0)
+    }
+
+    return JSON.stringify({ soft, classicSteps, softSteps, thumbs })
+  }
+
+  return Promise.race([work(), sleep(290000).then(() => 'TIMEOUT-290s')])
+})()

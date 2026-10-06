@@ -123,7 +123,21 @@ export function layerGeometryQuad(
 /** Axis-aligned bounds of `layerGeometryQuad`. */
 export function layerGeometryBox(results: LayerResult[], project: Project, layerId: string) {
   const q = layerGeometryQuad(results, project, layerId)
-  return q ? quadBounds(q) : null
+  if (!q) return null
+  const box = quadBounds(q)
+  // Far-field geometry (rays from off-canvas sources, long beams) would put
+  // the box and its rotation handle unreachable screens away. Show the visible
+  // region plus a margin instead: the intersection with the canvas expanded
+  // by 50%. An empty intersection (layer fully off-canvas) keeps the true
+  // box, so off-edge layers still track their placement.
+  const mx = project.canvas.w * 0.5
+  const my = project.canvas.h * 0.5
+  const ix0 = Math.max(box.x0, -mx)
+  const iy0 = Math.max(box.y0, -my)
+  const ix1 = Math.min(box.x1, project.canvas.w + mx)
+  const iy1 = Math.min(box.y1, project.canvas.h + my)
+  if (ix1 <= ix0 || iy1 <= iy0) return box
+  return { x0: ix0, y0: iy0, x1: ix1, y1: iy1 }
 }
 
 /**

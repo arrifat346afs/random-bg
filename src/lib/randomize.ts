@@ -124,6 +124,8 @@ const LIGHT_BG_MAX_PALETTE_LUMA = 90
 const LIGHT_BG_MAX_ADDITIVE = 0.8
 /** Light backgrounds are only defended above this perceived brightness. */
 const LIGHT_BG_LUMA = 185
+/** Ray layers need a darker ground: bright + additive beams clips to white. */
+const RAYS_MAX_BG_LUMA = 130
 
 const round3 = (x: number): number => Math.round(x * 1000) / 1000
 
@@ -202,11 +204,14 @@ function pairBackground(
   rng: RNG,
 ): Project['canvas']['bg'] {
   if (bg.kind === 'transparent') return bg
+  // ray layers need a dark or mid-tone ground to read as light; a bright
+  // ground plus additive beams has nowhere to go but white
+  const lightCap = layers.some((l) => l.gen === 'rays') ? RAYS_MAX_BG_LUMA : LIGHT_BG_LUMA
   const bgLuma =
     bg.kind === 'gradient'
       ? (lumaOf(bg.from) + lumaOf(bg.to)) / 2
       : lumaOf(bg.color)
-  if (bgLuma <= LIGHT_BG_LUMA) return bg
+  if (bgLuma <= lightCap) return bg
 
   const paletteLuma =
     palette.colors.reduce((s, c) => s + lumaOf(c), 0) / Math.max(1, palette.colors.length)
@@ -426,6 +431,7 @@ export function randomLayer(opts: LayerSampleOpts): Layer {
   layer.filtersBypassed = false
   tameScatter(layer, rng.fork('tame', layerSeed), 0.8)
   tameRings(layer, rng.fork('rings', layerSeed))
+  softenRays(layer, rng.fork('softrays', layerSeed))
   litScatter(layer)
   return layer
 }
@@ -482,6 +488,24 @@ export function tameRings(layer: Layer, rng: RNG): void {
   if (rng.next() < 0.85) {
     layer.params = { ...layer.params, shape: 'round' }
   }
+}
+
+/**
+ * Light layers must behave like light: soft volumetric style, additive
+ * blends at restrained opacity, a single source. The classic hard-polygon
+ * style stays available in the inspector, but the randomizer deals it rarely.
+ */
+export function softenRays(layer: Layer, rng: RNG): void {
+  if (layer.gen !== 'rays') return
+  if (rng.next() < 0.85) {
+    layer.params = { ...layer.params, style: 'soft' }
+  }
+  // many distribution origins read as crisscross chaos, not one light source
+  if (layer.params.origin === 'distribution' && rng.next() < 0.6) {
+    layer.params = { ...layer.params, origin: rng.pick(['center', 'corner'] as const) }
+  }
+  layer.blend = rng.pick(['screen', 'plus-lighter'] as const)
+  layer.opacity = Number(rng.range(0.35, 0.75).toFixed(3))
 }
 
 export function pickGenerator(rng: RNG): string {
@@ -555,8 +579,9 @@ export function pickRuled(
     } else {
       id = pickGenerator(rng)
     }
-    // avoid the same generator twice more than once
-    if (used.has(id) && rng.next() < 0.8) continue
+    // avoid the same generator twice more than once — except rays, which
+    // stacks additively and must never double up unless a recipe asks
+    if (used.has(id) && (id === 'rays' || rng.next() < 0.8)) continue
     if (isBase && id === 'mosaic' && rng.next() >= MOSAIC_BASE_KEEP) continue
     // busy bases are rare: heroes and fields carry the base, not scatter
     if (isBase && BUSY_GEN_IDS.has(id) && id !== 'mosaic' && rng.next() < 0.7) continue
