@@ -186,6 +186,19 @@ export function softenHarsh(project: Project): Project {
     if (i > 0 && l.blend === 'normal' && l.opacity > 0.6) {
       l.opacity = Math.max(0.3, round3(l.opacity * 0.8))
     }
+    // feather-less emissive fills: soften the available radius/softness
+    // params and drop flat overlays to a sheer blend
+    if (typeof l.params.softness === 'number') {
+      l.params = { ...l.params, softness: Math.max(l.params.softness as number, 0.5) }
+    }
+    if (typeof l.params.sizeMin === 'number') {
+      const floor = 0.08 * Math.min(project.canvas.w, project.canvas.h)
+      l.params = { ...l.params, sizeMin: Math.min(l.params.sizeMin as number, floor) }
+    }
+    if (typeof l.params.alpha === 'number' && l.params.alpha > 0.5) {
+      l.params = { ...l.params, alpha: 0.5 }
+    }
+    if (i > 0 && l.blend === 'normal') l.blend = 'soft-light'
   }
   capProjectChroma(next)
   return next
@@ -198,12 +211,16 @@ export function softenHarsh(project: Project): Project {
  * follow the project palette automatically.
  */
 export function capProjectChroma(project: Project): void {
+  tamePalettes(project, 0.18, 0.12)
+}
+
+function tamePalettes(project: Project, cMax: number, yMax: number): void {
   const tame = (colors: string[]): string[] =>
     colors.map((c) => {
       const lch = oklchFromHex(c)
       let out = c
-      if (lch.C > 0.18 && lch.L < 0.5) out = capChroma(out, 0.18)
-      return capYellow(out, 0.12)
+      if (lch.C > cMax && lch.L < 0.5) out = capChroma(out, cMax)
+      return capYellow(out, yMax)
     })
   project.palette = { ...project.palette, colors: tame(project.palette.colors) }
   for (const l of project.layers) {
@@ -213,6 +230,25 @@ export function capProjectChroma(project: Project): void {
       l.color = { ...l.color, palette: { ...l.color.palette, colors: tame(l.color.palette.colors) } }
     }
   }
+}
+
+/**
+ * Last-resort rescue for a candidate that is still harsh after soften: cut
+ * non-base opacity hard, crush outlines, and take chroma down to a whisper.
+ * Deterministic. Applied at most once per gate run (see randomProjectChecked).
+ */
+export function lastResort(project: Project): Project {
+  const next: Project = structuredClone(project)
+  for (let i = 0; i < next.layers.length; i++) {
+    const l = next.layers[i]
+    if (i > 0) l.opacity = Math.max(0.25, round3(l.opacity * 0.6))
+    const outline = l.params.outline
+    if (typeof outline === 'number' && outline > 0) {
+      l.params = { ...l.params, outline: outline * 0.2 }
+    }
+  }
+  tamePalettes(next, 0.1, 0.08)
+  return next
 }
 
 /**

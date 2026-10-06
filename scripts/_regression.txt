@@ -1,0 +1,116 @@
+/**
+ * scripts/_regression.txt — harshness positive/negative controls.
+ *
+ * Driven by `scripts/regression.ts`. Builds two hand-made harsh projects
+ * from the bug screenshots (fixed JSON, not seeds — the screenshots cropped
+ * the seed field) plus calm preset negatives, and reports harshness before
+ * and after the `softenHarsh` rescue:
+ *
+ *  (a) saturated yellow streaks on near-black, hard stripe edges
+ *  (b) flat hard-edged white blob on a smooth dark-green gradient
+ */
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const work = async () => {
+    const [rz, q, ex, svc, projM, genM, presets] = await Promise.all([
+      import('/src/lib/randomize.ts'),
+      import('/src/lib/quality.ts'),
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/service.ts'),
+      import('/src/lib/project.ts'),
+      import('/src/lib/generators/index.ts'),
+      import('/src/lib/presets.ts'),
+    ])
+    const byId = new Map(genM.GENERATORS.map((g) => [g.id, g]))
+    const DARK_YELLOW = ['#ffff00']
+
+    const mkLayer = (gen, params, palette, seed, extra = {}) => {
+      const layer = projM.createLayer(gen, seed)
+      layer.params = { ...byId.get(gen).defaults(), ...params }
+      layer.color = { mode: 'palette', palette: { name: 'custom', colors: palette.slice() }, ramp: 'linear', axis: 45, invert: false, linked: false, ...extra.color }
+      layer.blend = extra.blend ?? 'normal'
+      layer.opacity = extra.opacity ?? 1
+      layer.filters = []
+      layer.mods = []
+      return layer
+    }
+    const mkProject = (bg, layers, seed, palette) => ({
+      v: 1,
+      name: 'regression',
+      canvas: { w: 1080, h: 1080, bg },
+      seed,
+      palette: { name: 'custom', colors: palette.slice() },
+      layers,
+      groups: [],
+      motion: { drift: 0, twinkle: 0, pulse: 0, flow: 0, speed: 1 },
+    })
+
+    const positives = [
+      {
+        id: 'streak-yellow-black',
+        project: mkProject(
+          { kind: 'solid', color: '#050505' },
+          [mkLayer('geometric', { mode: 'grid', gridSteps: 8, count: 40, alpha: 1, width: 6 }, DARK_YELLOW, 11)],
+          11,
+          DARK_YELLOW,
+        ),
+      },
+      {
+        id: 'blob-on-green',
+        project: (() => {
+          const mesh = mkLayer('mesh', { cols: 3, rows: 3 }, ['#04150c', '#16603a', '#3fae6a', '#c8f5d0'], 12)
+          const blob = mkLayer('gradShapes', { shape: 'rect', layout: 'scattered', count: 1, sizeMin: 500, sizeMax: 600, softness: 0, alpha: 1 }, ['#ffffff'], 13)
+          return mkProject({ kind: 'solid', color: '#04150c' }, [mesh, blob], 12, ['#04150c', '#16603a', '#3fae6a', '#ffffff'])
+        })(),
+      },
+    ]
+
+    const negatives = [
+      'blue-glitter-bokeh',
+      'sunset-bokeh-field',
+      'winter-mountain-bokeh',
+      'aurora-mesh',
+      'rose-mesh',
+      'dusk-waves',
+      'forest-mist',
+      'emerald-silk-flow',
+    ]
+
+    const measure = async (project) => {
+      const out = await svc.requestRender(project, () => {})
+      const metrics = q.measureProject(project, out.results)
+      const verdict = q.judge(metrics)
+      return {
+        harsh: +metrics.harshness.toFixed(2),
+        codes: verdict.hard.concat(verdict.soft).map((r) => r.code),
+        nodes: out.results.reduce((s, r) => s + r.ir.stats.count, 0),
+        cov: +metrics.coverage.toFixed(1),
+        luma: +metrics.meanLuma.toFixed(0),
+        edge: +metrics.edge.toFixed(3),
+      }
+    }
+
+    const rows = []
+    for (const pos of positives) {
+      const pre = await measure(pos.project)
+      const softened = rz.softenHarsh(structuredClone(pos.project))
+      const post = await measure(softened)
+      rows.push({ kind: 'positive', id: pos.id, pre: pre.harsh, preCodes: pre.codes, post: post.harsh, postCodes: post.codes, diag: pre })
+      await sleep(0)
+    }
+    for (const id of negatives) {
+      const def = presets.PRESETS.find((p) => p.id === id)
+      if (!def) {
+        rows.push({ kind: 'negative', id, error: 'preset missing' })
+        continue
+      }
+      const m = await measure(presets.buildPreset(def))
+      rows.push({ kind: 'negative', id, pre: m.harsh, preCodes: m.codes, post: null, postCodes: null })
+      await sleep(0)
+    }
+    return JSON.stringify({ rows })
+  }
+
+  return Promise.race([work(), sleep(180000).then(() => 'TIMEOUT-180s')])
+})()

@@ -16,7 +16,7 @@
 
 import { hash32 } from './rng'
 import { oklchFromRgb } from './field/oklab'
-import { quenchAdditive, softenHarsh, randomProject } from './randomize'
+import { quenchAdditive, softenHarsh, lastResort, randomProject } from './randomize'
 import { activeLayers, totalPrimitives, type LayerResult } from './pipeline'
 import { compositeLayers } from './export'
 import { renderCanvas } from './render/canvas'
@@ -82,9 +82,8 @@ export interface Metrics {
   /** Luminance gap between the brightness centre-of-mass region and the rest. */
   focal: number
   /**
-   * Edge harshness: mean over edge pixels of (step × OKLab delta × chroma of
-   * the brighter side) × 100. Hard saturated edges on dark read ~10+; calm
-   * gradients read < 1.
+   * Edge harshness: mean over the hottest decile of edge pixels of
+   * (step × OKLab delta × max chroma of the two sides) × 100.
    */
   harshness: number
   /** True when a uniform grid layer (mosaic, geometric grid) is present. */
@@ -397,8 +396,10 @@ export function measureProject(project: Project, results: LayerResult[]): Metric
           const r1 = (c1.H * Math.PI) / 180
           const r2 = (c2.H * Math.PI) / 180
           const delta = Math.hypot(c1.L - c2.L, c1.C * Math.cos(r1) - c2.C * Math.cos(r2), c1.C * Math.sin(r1) - c2.C * Math.sin(r2))
-          const bright = lum[i] >= lum[i + 1] ? c1 : c2
-          harshScores.push((step / 255) * delta * bright.C)
+          // max chroma of the two sides: a white blob on a saturated ground
+          // is harsh even though the brighter side itself is achromatic
+          const chroma = Math.max(c1.C, c2.C)
+          harshScores.push((step / 255) * delta * chroma)
         }
       }
       const o = i * 4
@@ -503,6 +504,9 @@ function onlyHarshFailure(v: Verdict): boolean {
  *
  * Returns the first passing attempt, or — if the budget runs out first — the
  * highest-scoring one, so a randomise press always returns something.
+ * A passing attempt that still carries the harsh flag is kept as a candidate
+ * but rolled past; the final result never carries harsh (best clean candidate,
+ * else a last-resort pass over the best).
  */
 export async function randomProjectChecked(
   seed: number = Math.floor(Math.random() * 0xffffffff),
@@ -514,6 +518,9 @@ export async function randomProjectChecked(
   const deadline = performance.now() + Math.max(0, opts.budgetMs ?? 750)
   let budgetHit = false
   let best: CheckedRandom | null = null
+  // highest-scoring attempt that never carried the harsh flag — the final
+  // result must not be harsh, so a harsh best is dropped for this one
+  let bestClean: CheckedRandom | null = null
 
   for (let i = 0; i < maxTries; i++) {
     // attempt 0 uses the seed verbatim, so an already-good seed stays put
@@ -563,8 +570,12 @@ export async function randomProjectChecked(
       }
     }
     if (!best || attempt.verdict.score > best.verdict.score) best = attempt
+    if (!carriesHarsh(attempt.verdict) && (!bestClean || attempt.verdict.score > bestClean.verdict.score)) {
+      bestClean = attempt
+    }
 
-    if (verdict.ok) return { ...attempt, budgetHit }
+    // a passing attempt that still carries harsh is a candidate, not a result
+    if (verdict.ok && !carriesHarsh(verdict)) return { ...attempt, budgetHit }
 
     if (performance.now() >= deadline) {
       budgetHit = true
@@ -581,5 +592,20 @@ export async function randomProjectChecked(
     const metrics = measureProject(project, out.results)
     return { project, metrics, verdict: judge(metrics), attempts: 1, budgetHit: true }
   }
+  // the final result must never carry the harsh flag: prefer the best clean
+  // candidate, and last-resort the best only when every attempt was harsh
+  if (!carriesHarsh(best.verdict)) return { ...best, budgetHit }
+  if (bestClean) return { ...bestClean, budgetHit }
+  const rescued = lastResort(best.project)
+  const reOut = await requestRender(rescued, () => {})
+  if (reOut.results.length === activeLayers(rescued).length) {
+    const reMetrics = measureProject(rescued, reOut.results)
+    return { project: rescued, metrics: reMetrics, verdict: judge(reMetrics), attempts: best.attempts, budgetHit }
+  }
   return { ...best, budgetHit }
+}
+
+/** True when the verdict carries the harsh flag (hard or soft). */
+function carriesHarsh(v: Verdict): boolean {
+  return v.hard.concat(v.soft).some((r) => r.code === 'harsh')
 }
