@@ -1,0 +1,76 @@
+/**
+ * scripts/_thirty.txt — 30 fresh random projects contact sheet.
+ *
+ * Template: the driver replaces `__SEEDS__` with a JSON seed array.
+ * Each seed runs the full quality gate; thumbs carry generator mix +
+ * verdict so the "designed abstract background" review is one glance.
+ */
+(() => {
+  const SEEDS = __SEEDS_PLACEHOLDER__
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const work = async () => {
+    const [q, ex, cv, svc] = await Promise.all([
+      import('/src/lib/quality.ts'),
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/canvas.ts'),
+      import('/src/lib/render/service.ts'),
+    ])
+
+    const TW = 300
+    const TH = 190
+    const PAD = 8
+    const LABEL = 20
+    const HEADER = 34
+    const COLS = 5
+    const cw = TW + PAD * 2
+    const ch = TH + LABEL + PAD * 2
+    const rowCount = Math.ceil(SEEDS.length / COLS)
+    const sheet = document.createElement('canvas')
+    sheet.width = cw * COLS
+    sheet.height = HEADER + ch * rowCount
+    const g = sheet.getContext('2d')
+    g.fillStyle = '#14141a'
+    g.fillRect(0, 0, sheet.width, sheet.height)
+    g.fillStyle = '#e8e8ee'
+    g.font = 'bold 15px ui-monospace, monospace'
+    g.fillText('quality round 2 — 30 fresh random projects (gated)', 12, 22)
+
+    let ok = 0
+    for (let i = 0; i < SEEDS.length; i++) {
+      const seed = SEEDS[i]
+      const cx = (i % COLS) * cw
+      const cy = HEADER + Math.floor(i / COLS) * ch
+      g.fillStyle = '#0c0c11'
+      g.fillRect(cx + PAD, cy + PAD, TW, TH)
+      let label = `#${i + 1} seed ${seed} FAILED`
+      let pass = false
+      try {
+        const res = await q.randomProjectChecked(seed, { attempts: 8, budgetMs: 30000 }, () => {})
+        const out = await svc.requestRender(res.project, () => {})
+        const ir = ex.compositeLayers(res.project, out.results)
+        const sc = Math.min(TW / ir.w, TH / ir.h)
+        const c = document.createElement('canvas')
+        cv.renderCanvas(ir, c, { scale: sc })
+        g.drawImage(c, Math.round(cx + PAD + (TW - c.width) / 2), Math.round(cy + PAD + (TH - c.height) / 2))
+        pass = res.verdict.ok
+        if (pass) ok++
+        label = `#${i + 1} ${pass ? 'PASS' : 'best'} try${res.attempts} [${res.project.layers.map((l) => l.gen).join('+')}]`
+      } catch (e) {
+        g.fillStyle = '#ff6b6b'
+        g.font = '12px ui-monospace, monospace'
+        g.fillText('render failed', cx + PAD + 8, cy + PAD + 20)
+      }
+      g.strokeStyle = pass ? '#2f9e5f' : '#c0392b'
+      g.lineWidth = 2
+      g.strokeRect(cx + PAD + 1, cy + PAD + 1, TW - 2, TH - 2)
+      g.fillStyle = '#b9b9c6'
+      g.font = '11px ui-monospace, monospace'
+      g.fillText(label.slice(0, 46), cx + PAD, cy + PAD + TH + 14)
+      await sleep(0)
+    }
+    return JSON.stringify({ png: sheet.toDataURL('image/png'), ok, n: SEEDS.length })
+  }
+
+  return Promise.race([work(), sleep(290000).then(() => 'TIMEOUT-290s')])
+})()

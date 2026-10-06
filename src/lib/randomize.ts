@@ -531,7 +531,7 @@ const BUSY_GEN_IDS: ReadonlySet<string> = new Set(['particles', 'scatter', 'mosa
 /** Full-bleed pattern layers (cover the canvas edge to edge). */
 const PATTERN_GEN_IDS: ReadonlySet<string> = new Set(['mosaic', 'gradShapes', 'smoke', 'grain'])
 /** Chance the base (first) layer is drawn from the surface family. */
-const SURFACE_BASE_CHANCE = 0.7
+const SURFACE_BASE_CHANCE = 0.65
 /** Chance a mosaic roll is kept as the base layer (cap ≈ 10%). */
 const MOSAIC_BASE_KEEP = 0.1
 

@@ -117,7 +117,7 @@ export function generatorsByFamily(): { family: string; gens: GeneratorDef[] }[]
 
 /** Families the randomiser draws from, with relative weights. */
 export const FAMILY_WEIGHTS: [string, number][] = [
-  ['surface', 2.5],
+  ['surface', 1],
   ['particles', 4],
   ['light', 3],
   ['atmosphere', 2.4],
