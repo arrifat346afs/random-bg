@@ -201,7 +201,7 @@ export interface GeneratorDef<P extends Params = Params> {
   id: string
   name: string
   icon: string
-  family: 'particles' | 'light' | 'atmosphere' | 'geometry' | 'texture'
+  family: 'particles' | 'light' | 'atmosphere' | 'geometry' | 'texture' | 'surface'
   tags: string[]
   description: string
   params: ParamDef[]
