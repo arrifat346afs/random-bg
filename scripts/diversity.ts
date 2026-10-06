@@ -322,6 +322,37 @@ for (const r of ok) {
   if (bg.kind === 'noise') bgColors.add(`noise:${bg.color}`)
 }
 
+/* ---- quality round 2 summary ---------------------------------------------------- */
+
+const BUSY_IDS = ['particles', 'scatter', 'mosaic', 'bokeh']
+let whiteGT3 = 0
+let whiteRegionGT8 = 0
+let multiBusy = 0
+let edgeSum = 0
+let focalSum = 0
+let hueSum = 0
+let designedPass = 0
+for (const r of ok) {
+  const d = r.gated.desc
+  if (d.white > 3) whiteGT3++
+  if (d.whiteMax > 8) whiteRegionGT8++
+  if (r.gated.genIds.filter((g: string) => BUSY_IDS.includes(g)).length > 1) multiBusy++
+  edgeSum += d.edge
+  focalSum += d.focal
+  hueSum += d.hueCount
+  // provisional "designed look": capped whites, limited hues, smooth, focal
+  if (d.white <= 3 && d.whiteMax <= 8 && d.hueCount <= 4 && d.edge <= 0.25 && d.focal >= 12) designedPass++
+}
+const q2 = {
+  whiteGT3share: whiteGT3 / ok.length,
+  whiteRegionGT8share: whiteRegionGT8 / ok.length,
+  multiBusyShare: multiBusy / ok.length,
+  meanEdge: edgeSum / ok.length,
+  meanFocal: focalSum / ok.length,
+  meanHues: hueSum / ok.length,
+  designedPassShare: designedPass / ok.length,
+}
+
 /* ---- artefacts -------------------------------------------------------------- */
 
 mkdirSync(ROOT + '/outputs', { recursive: true })
@@ -347,6 +378,7 @@ writeFileSync(ROOT + '/outputs/diversity.json', JSON.stringify({
   enumTop,
   palettes: { names: [...paletteNames], distinctSets: paletteSets.size },
   bgs: { kinds: [...bgKinds], distinctColors: bgColors.size },
+  q2,
   rows: ok,
 }, null, 1))
 
@@ -425,6 +457,14 @@ lines.push(``)
 lines.push(`- palette names used: ${[...paletteNames].map(([k, v]) => `${k}=${v}`).join(', ')}`)
 lines.push(`- distinct palette colour-sets: ${paletteSets.size}/${ok.length}`)
 lines.push(`- bg kinds: ${[...bgKinds].map(([k, v]) => `${k}=${v}`).join(', ')}; distinct bg colours/specs: ${bgColors.size}`)
+lines.push(``)
+lines.push(`## quality round 2 (composite 128 px)`)
+lines.push(``)
+lines.push(`- pure-white >3%: ${whiteGT3}/${ok.length} (${pct(whiteGT3)})`)
+lines.push(`- white region >8% of canvas: ${whiteRegionGT8}/${ok.length} (${pct(whiteRegionGT8)})`)
+lines.push(`- >1 busy generator (particles/scatter/mosaic/bokeh): ${multiBusy}/${ok.length} (${pct(multiBusy)})`)
+lines.push(`- mean edge density: ${q2.meanEdge.toFixed(4)}; mean focal contrast: ${q2.meanFocal.toFixed(1)}; mean hue count: ${q2.meanHues.toFixed(2)}`)
+lines.push(`- provisional designed-look pass: ${designedPass}/${ok.length} (${pct(designedPass)})`)
 lines.push(``)
 writeFileSync(ROOT + '/outputs/diversity.md', lines.join('\n'))
 

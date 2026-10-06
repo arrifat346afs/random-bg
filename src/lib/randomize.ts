@@ -150,7 +150,10 @@ function additiveLoad(layers: Layer[]): number {
 function brightnessBudget(layers: Layer[]): Layer[] {
   const load = additiveLoad(layers)
   if (load <= ADDITIVE_BUDGET) return layers
-  const k = ADDITIVE_BUDGET / load
+  // soft shoulder (Reinhard-style): gentle just over budget, increasingly
+  // firm far over — highlights roll off instead of hitting a linear wall
+  const over = load - ADDITIVE_BUDGET
+  const k = ADDITIVE_BUDGET / load / (1 + over * 0.35)
   return layers.map((l) => {
     if (!ADDITIVE_BLENDS.has(l.blend)) return l
     const params: Params = { ...l.params }
@@ -162,6 +165,30 @@ function brightnessBudget(layers: Layer[]): Layer[] {
     }
     return { ...l, params, opacity: Math.max(0.25, round3(l.opacity * k)) }
   })
+}
+
+/**
+ * One deterministic rescue pass for a project that rendered too hot: halve
+ * the opacity of every additive layer and thin its counts toward the
+ * generator floor. Pure (a function of the project only), so the gate can
+ * apply it to a failing attempt and re-measure without breaking seed
+ * determinism. See `randomProjectChecked` — the quench path for white
+ * verdicts.
+ */
+export function quenchAdditive(project: Project): Project {
+  const next: Project = structuredClone(project)
+  for (const l of next.layers) {
+    if (!ADDITIVE_BLENDS.has(l.blend)) continue
+    l.opacity = Math.max(0.2, round3(l.opacity * 0.55))
+    const floor = minCountFor(l.gen)
+    for (const key of ['count', 'density', 'dustCount']) {
+      const cur = l.params[key]
+      if (typeof cur === 'number' && cur > floor) {
+        l.params[key] = Math.max(floor, Math.round(cur * 0.7))
+      }
+    }
+  }
+  return next
 }
 
 /**
@@ -309,19 +336,27 @@ export function randomDist(genId: string, rng: RNG): DistSpec {
 const MOD_CHANCE = 0.42
 
 function randomMods(genId: string, rng: RNG): ModifierSpec[] {
+  // a smooth field base is never standpoint-modified: displacing a handful of
+  // giant blobs only moves colour around, never improves it
+  if (genId === 'mesh') return []
   if (rng.next() > 0.72) return []
   const mods: ModifierSpec[] = []
   const candidates: ModType[] = ['noise', 'twist', 'kaleido', 'mirror', 'array', 'scaleByPos', 'colorByPos', 'axisFade', 'jitter']
-  // geometry generators love symmetry; particle layers love jitter
+  // geometry generators love symmetry; particle layers love jitter — except
+  // smooth silhouettes (scatter, bokeh), where noise/jitter displacement
+  // roughens edges into jagged contours instead of organic variation
+  const smoothSilhouette = genId === 'scatter' || genId === 'bokeh'
+  const calmCandidates: ModType[] = ['twist', 'mirror', 'array', 'scaleByPos', 'colorByPos', 'axisFade']
   const bias =
     genId === 'geometric' || genId === 'gradShapes' || genId === 'mosaic' ? ['kaleido', 'mirror', 'twist', 'array'] :
     genId === 'ribbons' ? ['twist', 'mirror', 'colorByPos', 'axisFade'] :
     genId === 'grain' ? [] :
+    smoothSilhouette ? ['colorByPos', 'axisFade', 'scaleByPos'] :
     ['noise', 'jitter', 'axisFade', 'colorByPos']
   const n = rng.next() < 0.25 ? 2 : 1
   for (let i = 0; i < n; i++) {
     if (rng.next() > MOD_CHANCE && i > 0) break
-    const pool = bias.length && rng.next() < 0.6 ? bias : candidates
+    const pool = bias.length && rng.next() < 0.6 ? bias : smoothSilhouette ? calmCandidates : candidates
     const type = rng.pick(pool) as ModType
     if (mods.some((m) => m.type === type)) continue
     const mod = defaultModifier(type)
@@ -389,17 +424,156 @@ export function randomLayer(opts: LayerSampleOpts): Layer {
   // canvas size for every existing seed the first time filters landed.
   layer.filters = randomFilterStack(rng.fork('filters', layerSeed))
   layer.filtersBypassed = false
+  tameScatter(layer, rng.fork('tame', layerSeed), 0.8)
+  tameRings(layer, rng.fork('rings', layerSeed))
+  litScatter(layer)
   return layer
+}
+
+/**
+ * Shapes layered over smooth surfaces must read lit, not flat clip-art: keep
+ * scatter's inner shading on and its outline strokes below heavy. Pure clamps
+ * (no RNG), so the artwork stream is untouched.
+ */
+function litScatter(layer: Layer): void {
+  if (layer.gen !== 'scatter') return
+  const params = { ...layer.params }
+  if (typeof params.shade === 'number') params.shade = Math.max(params.shade, 0.3)
+  if (typeof params.outline === 'number') params.outline = Math.min(params.outline, 0.5)
+  // snowflake arms are thin strokes: below this size they read as stray ticks
+  // and brackets instead of flakes (the snowflake-result artefact)
+  if (params.shape === 'snowflake' && typeof params.size === 'number') {
+    params.size = Math.max(params.size, 18)
+  }
+  layer.params = params
+}
+
+/**
+ * Scatter shapes that read cheap at scale (hearts, leaves, petals) are
+ * opt-in accents: resample most of them to neutral shapes, and keep any
+ * survivor small. `p` is the resample probability — the base layer of a
+ * project calls with 1 so cutesy shapes are never the main layer.
+ */
+const CUTESY_SCATTER = ['heart', 'leaf', 'petal']
+const NEUTRAL_SCATTER = ['confetti', 'star', 'hex', 'snowflake']
+
+export function tameScatter(layer: Layer, rng: RNG, p: number): void {
+  if (layer.gen !== 'scatter') return
+  const shape = layer.params.shape
+  if (typeof shape !== 'string' || !CUTESY_SCATTER.includes(shape)) return
+  if (rng.next() < p) {
+    layer.params = { ...layer.params, shape: rng.pick(NEUTRAL_SCATTER) }
+    return
+  }
+  const size = layer.params.size
+  if (typeof size === 'number' && size > 48) {
+    layer.params = { ...layer.params, size: 48 }
+  }
+}
+
+/**
+ * Bokeh `ring` outlines at low alpha read as stray ellipse artefacts rather
+ * than intentional optics. Keep the shape in the pool but deal it rarely —
+ * most ring rolls become soft filled discs.
+ */
+export function tameRings(layer: Layer, rng: RNG): void {
+  if (layer.gen !== 'bokeh') return
+  if (layer.params.shape !== 'ring') return
+  if (rng.next() < 0.85) {
+    layer.params = { ...layer.params, shape: 'round' }
+  }
 }
 
 export function pickGenerator(rng: RNG): string {
   // read the registry weights so adding a family or re-weighting one place
-  // updates every roll; previously this hardcoded a copy of the table
+  // updates every roll; previously this hardcoded a copy of the table.
+  // Learned taste multiplies in: family weights scale by member mean,
+  // within-family picks weight by per-generator multiplier (1 = neutral).
   const families = FAMILY_WEIGHTS.map(([f]) => f)
-  const weights = FAMILY_WEIGHTS.map(([, w]) => w)
+  const weights = FAMILY_WEIGHTS.map(([f, w]) => {
+    const members = GENERATORS.filter((g) => g.family === f)
+    const mean =
+      members.length > 0
+        ? members.reduce((s, g) => s + genMult(g.id), 0) / members.length
+        : 1
+    return w * Math.max(0.5, Math.min(2, mean))
+  })
   const family = rng.weighted(families, weights)
   const pool = GENERATORS.filter((g) => g.family === family)
-  return (pool.length ? rng.pick(pool) : rng.pick(GENERATORS)).id
+  if (!pool.length) return rng.pick(GENERATORS).id
+  return rng.weighted(pool, pool.map((g) => genMult(g.id))).id
+}
+
+/**
+ * Learned taste multipliers (human feedback loop). Module-level and neutral
+ * by default: the same seed rolls the same project until the user rates
+ * something, at which point taste shifts — deterministically per rater state.
+ * Values clamp to [0.3, 3] at the source (`feedback.ts`).
+ */
+let learnedGenMult: Record<string, number> = {}
+
+export function setLearnedGenMult(mult: Record<string, number>): void {
+  learnedGenMult = { ...mult }
+}
+
+const genMult = (id: string): number => {
+  const m = learnedGenMult[id] ?? 1
+  return m > 0 && Number.isFinite(m) ? m : 1
+}
+
+/**
+ * Busy generators (many small primitives fighting for attention) — at most
+ * ONE per project, and never combined with a full-bleed pattern. There is no
+ * `glyph`/`snow` generator in the registry; the snowflake *shape* lives in
+ * scatter and is covered by `tameScatter`.
+ */
+const BUSY_GEN_IDS: ReadonlySet<string> = new Set(['particles', 'scatter', 'mosaic', 'bokeh'])
+/** Full-bleed pattern layers (cover the canvas edge to edge). */
+const PATTERN_GEN_IDS: ReadonlySet<string> = new Set(['mosaic', 'gradShapes', 'smoke', 'grain'])
+/** Chance the base (first) layer is drawn from the surface family. */
+const SURFACE_BASE_CHANCE = 0.7
+/** Chance a mosaic roll is kept as the base layer (cap ≈ 10%). */
+const MOSAIC_BASE_KEEP = 0.1
+
+/**
+ * Generator pick with composition rules: surface base by default, the busy
+ * rule, and the mosaic-base cap. Falls back to an unruled pick rather than
+ * looping forever when the rules admit nothing (tiny pools).
+ */
+export function pickRuled(
+  rng: RNG,
+  isBase: boolean,
+  busyUsed: boolean,
+  patternUsed: boolean,
+  used: ReadonlySet<string>,
+): string {
+  for (let tries = 0; tries < 8; tries++) {
+    let id: string
+    if (isBase && rng.next() < SURFACE_BASE_CHANCE) {
+      const pool = GENERATORS.filter((g) => g.family === 'surface')
+      id = pool.length ? rng.weighted(pool, pool.map((g) => genMult(g.id))).id : pickGenerator(rng)
+    } else {
+      id = pickGenerator(rng)
+    }
+    // avoid the same generator twice more than once
+    if (used.has(id) && rng.next() < 0.8) continue
+    if (isBase && id === 'mosaic' && rng.next() >= MOSAIC_BASE_KEEP) continue
+    // busy bases are rare: heroes and fields carry the base, not scatter
+    if (isBase && BUSY_GEN_IDS.has(id) && id !== 'mosaic' && rng.next() < 0.7) continue
+    if (BUSY_GEN_IDS.has(id) && busyUsed) continue
+    if (BUSY_GEN_IDS.has(id) && patternUsed) continue
+    if (PATTERN_GEN_IDS.has(id) && busyUsed) continue
+    return id
+  }
+  // last resort: never break the busy rule — pick among the admissible ids
+  // (a lone mosaic is both busy and pattern on one layer, which is allowed)
+  const safe = GENERATORS.map((g) => g.id).filter(
+    (id) =>
+      !(BUSY_GEN_IDS.has(id) && busyUsed) &&
+      !(BUSY_GEN_IDS.has(id) && patternUsed) &&
+      !(PATTERN_GEN_IDS.has(id) && busyUsed),
+  )
+  return safe.length ? rng.pick(safe) : pickGenerator(rng)
 }
 
 /**
@@ -476,21 +650,19 @@ export function randomProject(seed?: number, opts: RandomProjectOpts = {}): Proj
   const nLayers = opts.layers ?? rng.weighted([1, 2, 3, 4], [1.5, 3.5, 3, 1.4])
   const layers: Layer[] = []
   const used = new Set<string>()
+  let busyUsed = false
+  let patternUsed = false
 
   for (let i = 0; i < nLayers; i++) {
-    let genId = pickGenerator(rng)
-    // avoid the same generator twice more than once
-    if (used.has(genId) && rng.next() < 0.8) {
-      for (let tries = 0; tries < 6; tries++) {
-        const candidate = pickGenerator(rng)
-        if (!used.has(candidate)) {
-          genId = candidate
-          break
-        }
-      }
-    }
+    const isBase = i === 0
+    const genId = pickRuled(rng, isBase, busyUsed, patternUsed, used)
     used.add(genId)
-    layers.push(randomLayer({ genId, palette, rng }))
+    if (BUSY_GEN_IDS.has(genId)) busyUsed = true
+    if (PATTERN_GEN_IDS.has(genId)) patternUsed = true
+    const layer = randomLayer({ genId, palette, rng })
+    // cutesy scatter is never the main layer
+    if (isBase) tameScatter(layer, rng.fork('tame-base', layer.seedOffset), 1)
+    layers.push(layer)
   }
 
   // at most one texture layer, placed on top

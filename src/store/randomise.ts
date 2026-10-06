@@ -24,6 +24,13 @@ let busy = false
 export const isRandomising = (): boolean => busy
 
 /**
+ * The most recent gated roll (null when the fallback path was taken). The
+ * feedback loop reads the seed, generator mix and gate metrics from here so
+ * a rating costs zero extra renders.
+ */
+export let lastChecked: CheckedRandom | null = null
+
+/**
  * Roll a random project under the quality gate and install it.
  *
  * Drives the render store's `generating`/`progress` flags, so the preview's
@@ -63,6 +70,7 @@ export async function randomise(opts: RandomOpts = {}): Promise<CheckedRandom | 
     // taken exactly when the gate fails, so ignoring it would reshape the canvas
     // on the rolls the user is most likely to notice.
     const next = checked ? checked.project : randomProject(undefined, roll)
+    lastChecked = checked
     useProjectStore.getState().applyProject(next)
     return checked
   } finally {

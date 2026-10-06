@@ -103,6 +103,53 @@
     }
     const symPairs = Math.max(1, bh * half)
     const order = hueHist.map((v, k) => [v, k * 30 + 15]).sort((p, q) => q[0] - p[0])
+    // composite pure-white pixels + largest 4-connected white region
+    const isWhite = new Uint8Array(n)
+    let white = 0
+    for (let i = 0; i < n; i++) {
+      const o = i * 4
+      if (pd[o] >= 250 && pd[o + 1] >= 250 && pd[o + 2] >= 250) {
+        isWhite[i] = 1
+        white++
+      }
+    }
+    let whiteMax = 0
+    const seen = new Uint8Array(n)
+    const stack = []
+    for (let i = 0; i < n; i++) {
+      if (!isWhite[i] || seen[i]) continue
+      let size = 0
+      stack.push(i)
+      seen[i] = 1
+      while (stack.length) {
+        const c = stack.pop()
+        size++
+        const cxp = c % bw, cyp = (c / bw) | 0
+        if (cxp > 0 && isWhite[c - 1] && !seen[c - 1]) { seen[c - 1] = 1; stack.push(c - 1) }
+        if (cxp < bw - 1 && isWhite[c + 1] && !seen[c + 1]) { seen[c + 1] = 1; stack.push(c + 1) }
+        if (cyp > 0 && isWhite[c - bw] && !seen[c - bw]) { seen[c - bw] = 1; stack.push(c - bw) }
+        if (cyp < bh - 1 && isWhite[c + bw] && !seen[c + bw]) { seen[c + bw] = 1; stack.push(c + bw) }
+      }
+      if (size > whiteMax) whiteMax = size
+    }
+    // hue count: bins carrying >3% of the saturation-weighted hue mass
+    let hueTotal = 0
+    for (const v of hueHist) hueTotal += v
+    let hueCount = 0
+    for (const v of hueHist) if (hueTotal > 0 && v / hueTotal > 0.03) hueCount++
+    // focal contrast: mean luma near the centre of mass vs the rest
+    const fcx = comW > 0 ? comX / comW : bw / 2
+    const fcy = comW > 0 ? comY / comW : bh / 2
+    const fr = Math.min(bw, bh) * 0.25
+    let fIn = 0, fInN = 0, fOut = 0, fOutN = 0
+    for (let y = 0; y < bh; y++) {
+      for (let x = 0; x < bw; x++) {
+        const L = lum[y * bw + x]
+        const dx = x - fcx, dy = y - fcy
+        if (dx * dx + dy * dy <= fr * fr) { fIn += L; fInN++ } else { fOut += L; fOutN++ }
+      }
+    }
+    const focal = Math.abs(fIn / Math.max(1, fInN) - fOut / Math.max(1, fOutN))
     return {
       w: bw,
       h: bh,
@@ -116,6 +163,10 @@
       cy: comW > 0 ? +((comY / comW / Math.max(1, bh - 1))).toFixed(4) : 0.5,
       sym: +(1 - symD / symPairs / 255).toFixed(4),
       hist,
+      white: +(white / Math.max(1, n) * 100).toFixed(2),
+      whiteMax: +(whiteMax / Math.max(1, n) * 100).toFixed(2),
+      hueCount,
+      focal: +focal.toFixed(1),
     }
   }
 

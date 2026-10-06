@@ -15,7 +15,7 @@
  */
 
 import { hash32 } from './rng'
-import { randomProject } from './randomize'
+import { quenchAdditive, randomProject } from './randomize'
 import { activeLayers, totalPrimitives, type LayerResult } from './pipeline'
 import { compositeLayers } from './export'
 import { renderCanvas } from './render/canvas'
@@ -36,8 +36,28 @@ export const WHITE_MAX = 30
 export const CONTRAST_MIN = 8
 /** Content-to-ground luma gap below which the content sits *on* the ground. */
 export const SEPARATION_MIN = 12
+/**
+ * Coverage above which there is no visible ground left, so content/ground
+ * separation is vacuous — full-bleed results are judged on their own merits
+ * (noise, hues, focus, grid) instead of an always-firing `merged`.
+ */
+export const SEPARATION_MAX_COVERAGE = 95
+/** Focal demand applies only when there is structure to focus (edge floor). */
+export const FOCAL_MIN_EDGE = 0.08
 /** Fewer primitives than this reads as an accident (soft penalty). */
 export const NODES_MIN = 16
+/** Edge density above which a result reads as high-frequency noise. */
+export const EDGE_MAX = 0.25
+/** Distinct hues above which the palette reads as confetti (5 + 1 accent). */
+export const HUES_MAX = 6
+/** Focal luminance gap below which there is no clear focal region. */
+export const FOCAL_MIN = 8
+/** Uniform-grid coverage above which the grid dominates the canvas. */
+export const GRID_COVERAGE_MAX = 40
+/** % of composite pixels at pure white above which highlights have clipped. */
+export const WHITE_CAP = 3
+/** Largest single pure-white region (% of canvas) above which it reads as a hole. */
+export const WHITE_REGION_MAX = 8
 
 /* ---- Metrics ------------------------------------------------------------ */
 
@@ -48,6 +68,18 @@ export interface Metrics {
   meanLuma: number
   /** % of pixels that are pure white. */
   whiteShare: number
+  /** % of composite pixels (over its own ground) at pure white — clipped highlights. */
+  whiteComposite: number
+  /** Largest 4-connected pure-white region, % of canvas. */
+  whiteRegion: number
+  /** High-frequency energy: share of pixels with a strong luma step. */
+  edge: number
+  /** Distinct hues carrying >3% of saturation-weighted mass (max ~12). */
+  hueCount: number
+  /** Luminance gap between the brightness centre-of-mass region and the rest. */
+  focal: number
+  /** True when a uniform grid layer (mosaic, geometric grid) is present. */
+  gridLayer: boolean
   /** Standard deviation of luma — "is there any structure at all". */
   contrast: number
   /** |mean luma of content − mean luma of ground| — "can you see it". */
@@ -59,7 +91,19 @@ export interface Metrics {
 }
 
 export interface Reason {
-  code: 'blank' | 'dark' | 'blown' | 'flat' | 'merged' | 'sparse'
+  code:
+    | 'blank'
+    | 'dark'
+    | 'blown'
+    | 'flat'
+    | 'merged'
+    | 'sparse'
+    | 'whiteCap'
+    | 'whiteRegion'
+    | 'noisy'
+    | 'manyHues'
+    | 'noFocus'
+    | 'gridPattern'
   why: string
 }
 
@@ -100,13 +144,23 @@ export function judge(m: Metrics): Verdict {
       code: 'blown',
       why: `${m.whiteShare.toFixed(1)}% pure white > ${WHITE_MAX}%`,
     })
+  if (m.whiteComposite > WHITE_CAP)
+    hard.push({
+      code: 'whiteCap',
+      why: `${m.whiteComposite.toFixed(1)}% clipped white > ${WHITE_CAP}%`,
+    })
+  if (m.whiteRegion > WHITE_REGION_MAX)
+    hard.push({
+      code: 'whiteRegion',
+      why: `white region ${m.whiteRegion.toFixed(1)}% > ${WHITE_REGION_MAX}%`,
+    })
 
   if (m.contrast < CONTRAST_MIN)
     soft.push({
       code: 'flat',
       why: `contrast ${m.contrast.toFixed(1)} < ${CONTRAST_MIN}`,
     })
-  if (m.separation < SEPARATION_MIN)
+  if (m.separation < SEPARATION_MIN && m.coverage < SEPARATION_MAX_COVERAGE)
     soft.push({
       code: 'merged',
       why: `content/ground gap ${m.separation.toFixed(1)} < ${SEPARATION_MIN}`,
@@ -116,6 +170,26 @@ export function judge(m: Metrics): Verdict {
       code: 'sparse',
       why: `${m.nodes} primitives < ${NODES_MIN}`,
     })
+  if (m.edge > EDGE_MAX)
+    soft.push({
+      code: 'noisy',
+      why: `edge density ${m.edge.toFixed(2)} > ${EDGE_MAX}`,
+    })
+  if (m.hueCount > HUES_MAX)
+    soft.push({
+      code: 'manyHues',
+      why: `${m.hueCount} hues > ${HUES_MAX}`,
+    })
+  if (m.focal < FOCAL_MIN && m.edge > FOCAL_MIN_EDGE)
+    soft.push({
+      code: 'noFocus',
+      why: `focal contrast ${m.focal.toFixed(1)} < ${FOCAL_MIN}`,
+    })
+  if (m.gridLayer && m.coverage > GRID_COVERAGE_MAX)
+    soft.push({
+      code: 'gridPattern',
+      why: `uniform grid covers ${m.coverage.toFixed(1)}% > ${GRID_COVERAGE_MAX}%`,
+    })
 
   const ok = hard.length === 0 && soft.length < 2
 
@@ -124,6 +198,10 @@ export function judge(m: Metrics): Verdict {
   score += Math.min(m.contrast, 70) * 0.6 // structure
   score += m.meanLuma >= 6 && m.meanLuma <= 210 ? 18 : 0 // usable exposure
   score -= Math.max(0, m.whiteShare - 15) * 2 // blowout
+  score -= Math.max(0, m.whiteComposite - 1.5) * 6 // clipped highlights
+  score += Math.min(m.focal, 40) * 0.25 // a clear focal region
+  score -= Math.max(0, m.hueCount - 4) * 4 // limited palette
+  score -= Math.max(0, m.edge - 0.2) * 50 // calm surfaces
   score -= soft.length * 12 // each penalty costs a little
   score -= hard.length * 40 // hard failures rank last
 
@@ -133,6 +211,26 @@ export function judge(m: Metrics): Verdict {
 /* ---- Measurement -------------------------------------------------------- */
 
 const luma = (r: number, g: number, b: number): number => 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+/** Saturation + hue of an sRGB triple (h 0..360, s 0..1) for the hue census. */
+function rgbSatHue(r: number, g: number, b: number): [number, number] {
+  const R = r / 255
+  const G = g / 255
+  const B = b / 255
+  const mx = Math.max(R, G, B)
+  const mn = Math.min(R, G, B)
+  const l = (mx + mn) / 2
+  let h = 0
+  let s = 0
+  if (mx !== mn) {
+    const d = mx - mn
+    s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn)
+    if (mx === R) h = ((G - B) / d + (G < B ? 6 : 0)) * 60
+    else if (mx === G) h = ((B - R) / d + 2) * 60
+    else h = ((R - G) / d + 4) * 60
+  }
+  return [h, s]
+}
 
 /**
  * Render `results` once at {@link MEASURE_W} px and read the numbers back.
@@ -168,19 +266,29 @@ export function measureProject(project: Project, results: LayerResult[]): Metric
   const n = bw * bh
   let covered = 0
   let white = 0
+  let whiteComp = 0
   let sum = 0
   let sumSq = 0
   let fgSum = 0
   let fgN = 0
   let bgSum = 0
   let bgN = 0
+  // composite pure-white mask, for the largest-region flood fill below
+  const whiteMask = new Uint8Array(n)
+  // luma field, for the designed-look pass (edge / hue / focal) below
+  const lum = new Float32Array(n)
 
   for (let i = 0; i < bd.length; i += 4) {
     const a = bd[i + 3]
     if (a >= 8) covered++
     if (a >= 240 && bd[i] >= 250 && bd[i + 1] >= 250 && bd[i + 2] >= 250) white++
+    if (pd[i] >= 250 && pd[i + 1] >= 250 && pd[i + 2] >= 250) {
+      whiteComp++
+      whiteMask[i / 4] = 1
+    }
 
     const L = luma(pd[i], pd[i + 1], pd[i + 2])
+    lum[i / 4] = L
     sum += L
     sumSq += L * L
     if (a >= 128) {
@@ -192,15 +300,109 @@ export function measureProject(project: Project, results: LayerResult[]): Metric
     }
   }
 
+  // largest 4-connected pure-white region (% of canvas) — a big white hole
+  // reads as broken even when the total white share is modest
+  let whiteRegion = 0
+  {
+    const seen = new Uint8Array(n)
+    const stack: number[] = []
+    for (let i = 0; i < n; i++) {
+      if (!whiteMask[i] || seen[i]) continue
+      let size = 0
+      stack.push(i)
+      seen[i] = 1
+      while (stack.length) {
+        const c = stack.pop() as number
+        size++
+        const cx = c % bw
+        if (cx > 0 && whiteMask[c - 1] && !seen[c - 1]) {
+          seen[c - 1] = 1
+          stack.push(c - 1)
+        }
+        if (cx < bw - 1 && whiteMask[c + 1] && !seen[c + 1]) {
+          seen[c + 1] = 1
+          stack.push(c + 1)
+        }
+        if (c >= bw && whiteMask[c - bw] && !seen[c - bw]) {
+          seen[c - bw] = 1
+          stack.push(c - bw)
+        }
+        if (c < n - bw && whiteMask[c + bw] && !seen[c + bw]) {
+          seen[c + bw] = 1
+          stack.push(c + bw)
+        }
+      }
+      if (size > whiteRegion) whiteRegion = size
+    }
+    whiteRegion = (whiteRegion / Math.max(1, n)) * 100
+  }
+
   const meanLuma = sum / Math.max(1, n)
   const variance = Math.max(0, sumSq / Math.max(1, n) - meanLuma * meanLuma)
   const fgLuma = fgN ? fgSum / fgN : meanLuma
   const groundLuma = bgN ? bgSum / bgN : meanLuma
 
+  // designed-look pass over the composite: high-frequency energy, hue
+  // count and focal contrast. One extra pixel loop (~65k px) — cheap next
+  // to the renders that produced these pixels.
+  let edgeN = 0
+  let comX = 0
+  let comY = 0
+  let comW = 0
+  for (let y = 0; y < bh; y++) {
+    for (let x = 0; x < bw; x++) {
+      const L = lum[y * bw + x]
+      comX += x * L
+      comY += y * L
+      comW += L
+    }
+  }
+  const fcx = comW > 0 ? comX / comW : bw / 2
+  const fcy = comW > 0 ? comY / comW : bh / 2
+  const fr = Math.min(bw, bh) * 0.25
+  const hueHist = new Array(12).fill(0)
+  let fIn = 0
+  let fInN = 0
+  let fOut = 0
+  let fOutN = 0
+  for (let y = 0; y < bh; y++) {
+    for (let x = 0; x < bw; x++) {
+      const i = y * bw + x
+      if (x < bw - 1 && y < bh - 1) {
+        if (Math.abs(lum[i] - lum[i + 1]) + Math.abs(lum[i] - lum[i + bw]) > 30) edgeN++
+      }
+      const o = i * 4
+      const [h, s] = rgbSatHue(pd[o], pd[o + 1], pd[o + 2])
+      hueHist[Math.min(11, Math.floor((((h % 360) + 360) % 360) / 30))] += s
+      const dx = x - fcx
+      const dy = y - fcy
+      if (dx * dx + dy * dy <= fr * fr) {
+        fIn += lum[i]
+        fInN++
+      } else {
+        fOut += lum[i]
+        fOutN++
+      }
+    }
+  }
+  let hueTotal = 0
+  for (const v of hueHist) hueTotal += v
+  let hueCount = 0
+  for (const v of hueHist) if (hueTotal > 0 && v / hueTotal > 0.03) hueCount++
+  const gridLayer = project.layers.some(
+    (l) => l.gen === 'mosaic' || (l.gen === 'geometric' && (l.params.mode === 'grid' || l.params.mode === 'hexGrid')),
+  )
+
   return {
     coverage: (covered / Math.max(1, n)) * 100,
     meanLuma,
     whiteShare: (white / Math.max(1, n)) * 100,
+    whiteComposite: (whiteComp / Math.max(1, n)) * 100,
+    whiteRegion,
+    edge: edgeN / Math.max(1, (bw - 1) * (bh - 1)),
+    hueCount,
+    focal: Math.abs(fIn / Math.max(1, fInN) - fOut / Math.max(1, fOutN)),
+    gridLayer,
     contrast: Math.sqrt(variance),
     separation: Math.abs(fgLuma - groundLuma),
     nodes: totalPrimitives(results),
@@ -236,6 +438,15 @@ export interface CheckedRandom {
 }
 
 const nextTick = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
+
+/** True when every hard failure is a clipped-white one (rescuable by quench). */
+function onlyWhiteFailure(v: Verdict): boolean {
+  return (
+    v.hard.length > 0 &&
+    v.hard.every((r) => r.code === 'whiteCap' || r.code === 'whiteRegion' || r.code === 'blown') &&
+    v.soft.length < 2
+  )
+}
 
 /**
  * Randomise with a quality gate: roll, render, measure, reject, re-roll.
@@ -274,9 +485,24 @@ export async function randomProjectChecked(
     if (out.results.length !== activeLayers(project).length) continue
 
     const metrics = measureProject(project, out.results)
-    const verdict = judge(metrics)
+    let verdict = judge(metrics)
     onAttempt?.({ project, metrics, verdict, attempt: i + 1 })
-    const attempt: CheckedRandom = { project, metrics, verdict, attempts: i + 1, budgetHit: false }
+    let attempt: CheckedRandom = { project, metrics, verdict, attempts: i + 1, budgetHit: false }
+
+    // White-only failure → one deterministic rescue: dim the additive stack
+    // (`quenchAdditive` is pure, so the rescue is seed-deterministic) and
+    // re-measure within the same attempt instead of burning a re-roll.
+    if (!verdict.ok && onlyWhiteFailure(verdict)) {
+      const rescued = quenchAdditive(project)
+      const reOut = await requestRender(rescued, () => {})
+      if (reOut.results.length === activeLayers(rescued).length) {
+        const reMetrics = measureProject(rescued, reOut.results)
+        const reVerdict = judge(reMetrics)
+        onAttempt?.({ project: rescued, metrics: reMetrics, verdict: reVerdict, attempt: i + 1 })
+        attempt = { project: rescued, metrics: reMetrics, verdict: reVerdict, attempts: i + 1, budgetHit: false }
+        verdict = reVerdict
+      }
+    }
     if (!best || attempt.verdict.score > best.verdict.score) best = attempt
 
     if (verdict.ok) return { ...attempt, budgetHit }

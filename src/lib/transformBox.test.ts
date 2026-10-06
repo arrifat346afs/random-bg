@@ -26,10 +26,6 @@ function makeView(scale: number): StageView {
 // knob position in each direction.
 const STAGE = { width: 10000, height: 10000 }
 
-// A stage with a smaller margin for the stem length tests, so the knob
-// is not clamped at extreme scales.
-const STAGE_NO_CLAMP = { width: 100, height: 100 }
-
 function stemLength(box: ReturnType<typeof computeTransformBox>): number {
   const n = box.edgeMids.n
   const end = box.rotateStemEnd
@@ -76,7 +72,7 @@ describe('computeTransformBox', () => {
   describe('box dimensions match geometry bounds', () => {
     test('unrotated box: width and height match geometry', () => {
       const box = computeTransformBox(BOX, IDENTITY_TRANSFORM, makeView(1), STAGE)
-      const [tl, tr, br, bl] = box.corners
+      const [tl, tr, , bl] = box.corners
       const width = Math.hypot(tr.x - tl.x, tr.y - tl.y)
       const height = Math.hypot(bl.x - tl.x, bl.y - tl.y)
       expect(width).toBeCloseTo(BOX.x1 - BOX.x0, 5)
@@ -86,7 +82,7 @@ describe('computeTransformBox', () => {
     test('scaled box: dimensions scale with the layer', () => {
       const t: LayerTransform = { ...IDENTITY_TRANSFORM, scaleX: 2, scaleY: 3 }
       const box = computeTransformBox(BOX, t, makeView(1), STAGE)
-      const [tl, tr, br, bl] = box.corners
+      const [tl, tr, , bl] = box.corners
       const width = Math.hypot(tr.x - tl.x, tr.y - tl.y)
       const height = Math.hypot(bl.x - tl.x, bl.y - tl.y)
       expect(width).toBeCloseTo((BOX.x1 - BOX.x0) * 2, 5)
@@ -113,7 +109,6 @@ describe('computeTransformBox', () => {
   describe('edge cases', () => {
     test('single point bounds: no exception, valid box', () => {
       const point: Rect = { x0: 50, y0: 50, x1: 50, y1: 50 }
-      const box = computeTransformBox(point, IDENTITY_TRANSFORM, makeView(1), STAGE)
       // A single point has zero area, so isValidTransformBox returns false.
       // But the function should not throw.
       expect(() => computeTransformBox(point, IDENTITY_TRANSFORM, makeView(1), STAGE)).not.toThrow()

@@ -13,6 +13,7 @@ import { useEffect } from 'react'
 import { isTyping } from '@/lib/keyboard'
 import { duplicateLayer } from '@/lib/project'
 import { randomise } from '@/store/randomise'
+import { useFeedbackStore } from '@/store/feedbackStore'
 import { useProjectStore } from '@/store/projectStore'
 import { useUiStore } from '@/store/uiStore'
 
@@ -69,6 +70,14 @@ export function useGlobalShortcuts(): void {
         case 'r':
           e.preventDefault()
           void randomise()
+          break
+        case ']':
+          e.preventDefault()
+          useFeedbackStore.getState().rateCurrent('like')
+          break
+        case '[':
+          e.preventDefault()
+          useFeedbackStore.getState().rateCurrent('dislike')
           break
         case 'e':
           e.preventDefault()

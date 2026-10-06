@@ -231,7 +231,7 @@ export function isValidTransformBox(box: TransformBox): boolean {
     return false
   }
   // A zero-scale transform collapses all corners to one point.
-  const [tl, tr, br, bl] = box.corners
+  const [tl, tr, , bl] = box.corners
   const width = Math.hypot(tr.x - tl.x, tr.y - tl.y)
   const height = Math.hypot(bl.x - tl.x, bl.y - tl.y)
   return width > 1e-9 && height > 1e-9

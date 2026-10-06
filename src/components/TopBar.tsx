@@ -29,6 +29,7 @@ import {
   Copy,
   Ratio,
 } from 'lucide-react'
+import { FeedbackButtons } from './top-bar/FeedbackButtons'
 import { useProjectStore } from '@/store/projectStore'
 import { MenuItem } from './top-bar/MenuItem'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -283,6 +284,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
           <Sparkles />
           <span className="hidden lg:inline">Mutate</span>
         </Button>
+        <FeedbackButtons />
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

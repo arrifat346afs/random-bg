@@ -1,0 +1,149 @@
+/**
+ * scripts/_artifact-hunt.txt — artefact repro + gradient regression probe.
+ *
+ * Evaluated in the dev-server page via `scripts/cdp-eval.ts`, driven by
+ * `scripts/artifacts.ts`. Renders fixed suspect configurations (not random
+ * rolls) at 256 px, measures column/row luminance cliffs, and returns thumbs.
+ *
+ * Suspects (quality round 2):
+ *  (a) faint dotted grid lines over ribbons → geometric grid under ribbons
+ *  (b) ellipse outline rings → bokeh ring shapes (tamed in randomize)
+ *  (c) darker vertical strip at the right edge of a smooth gradient → mesh-only
+ *  (d) crossed diamonds at the corners → geometric + mirror modifier
+ *  (e) white ticks over mosaic → small snowflake scatter over mosaic
+ */
+(() => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const lumaOf = (h) => {
+    const n = parseInt(h.replace('#', '').slice(0, 6), 16)
+    return 0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)
+  }
+
+  /** Max adjacent column/row mean-luma step (0–255). A clean gradient ≈ small. */
+  function cliffs(cv, ir, bg) {
+    const sc = 256 / Math.max(1, ir.w)
+    const c = document.createElement('canvas')
+    cv.renderCanvas(ir, c, { scale: sc, background: bg })
+    const { width: bw, height: bh } = c
+    const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, bw, bh).data
+    const col = new Array(bw).fill(0)
+    const row = new Array(bh).fill(0)
+    for (let y = 0; y < bh; y++) {
+      for (let x = 0; x < bw; x++) {
+        const o = (y * bw + x) * 4
+        const L = 0.2126 * d[o] + 0.7152 * d[o + 1] + 0.0722 * d[o + 2]
+        col[x] += L
+        row[y] += L
+      }
+    }
+    for (let x = 0; x < bw; x++) col[x] /= bh
+    for (let y = 0; y < bh; y++) row[y] /= bw
+    let mc = 0, mr = 0, atX = 0
+    for (let x = 1; x < bw; x++) {
+      const s = Math.abs(col[x] - col[x - 1])
+      if (s > mc) { mc = s; atX = x }
+    }
+    for (let y = 1; y < bh; y++) mr = Math.max(mr, Math.abs(row[y] - row[y - 1]))
+    return { maxColStep: +mc.toFixed(2), atX, maxRowStep: +mr.toFixed(2), w: bw, h: bh }
+  }
+
+  const work = async () => {
+    const [rz, ex, cv, svc, gens] = await Promise.all([
+      import('/src/lib/randomize.ts'),
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/canvas.ts'),
+      import('/src/lib/render/service.ts'),
+      import('/src/lib/generators/index.ts'),
+    ])
+    const byId = new Map(gens.GENERATORS.map((g) => [g.id, g]))
+
+    const mkLayer = (gen, params, seed, extra = {}) => {
+      const def = byId.get(gen)
+      const layer = {
+        id: `a-${gen}-${seed}`,
+        name: gen,
+        gen,
+        params: { ...def.defaults(), ...params },
+        dist: { type: 'uniform', clusters: 6, curve: 'sine', curveAmount: 0.35, band: 0.16, inner: 0, radialFalloff: 1, arms: 3, radius: 0.06, noiseScale: 3, noiseContrast: 1, noiseThreshold: 0.4, edgeFalloff: 0, sizePower: 1, sizeMin: 0.4, sizeMax: 1, opacityFalloff: 0.2, depth: 0.4, maskInvert: false, maskStrength: 1 },
+        mods: extra.mods ?? [],
+        color: { mode: 'palette', palette: { name: extra.palName ?? 'custom', colors: extra.palette ?? ['#ffffff'] }, ramp: 'linear', axis: 45, invert: false, linked: false },
+        blend: extra.blend ?? 'normal',
+        opacity: extra.opacity ?? 1,
+        visible: true,
+        solo: false,
+        locked: false,
+        seedOffset: 7,
+        salt: seed,
+        locks: {},
+        groupId: null,
+      }
+      return layer
+    }
+    const mkProject = (bg, layers, seed) => ({
+      v: 1, name: 'probe', canvas: { w: 1080, h: 1080, bg }, seed,
+      palette: { name: 'custom', colors: ['#032b3a', '#00c2a8', '#e9fff9'] },
+      layers, groups: [],
+      motion: { drift: 0, twinkle: 0, pulse: 0, flow: 0, speed: 1 },
+    })
+
+    const DARK = { kind: 'solid', color: '#0a0a10' }
+    const cases = [
+      {
+        id: 'mesh-only',
+        why: '(c) gradient-only regression: no column/row cliff allowed',
+        project: mkProject(DARK, [
+          mkLayer('mesh', { cols: 3, rows: 3, jitter: 0.5, warp: 0.4, warpScale: 1.4, mapping: 'ramp', softness: 0.85, alpha: 1 }, 101, { palette: ['#032b3a', '#00c2a8', '#5e35b1', '#b39ddb'] }),
+        ], 101),
+      },
+      {
+        id: 'ribbons-over-grid',
+        why: '(a) dotted grid suspect: geometric grid under ribbons',
+        project: mkProject(DARK, [
+          mkLayer('geometric', { mode: 'grid', gridSteps: 24, count: 60 }, 102, { palette: ['#2a63d8', '#74b8ff'] }),
+          mkLayer('ribbons', {}, 103, { palette: ['#c77dff', '#ffb3f0'], blend: 'screen', opacity: 0.8 }),
+        ], 102),
+      },
+      {
+        id: 'geo-mirror',
+        why: '(d) corner diamonds suspect: geometric + mirror modifier',
+        project: mkProject(DARK, [
+          mkLayer('geometric', { mode: 'hexGrid', gridSteps: 12, count: 40 }, 104, { palette: ['#e9f6ff', '#74b8ff'], mods: [{ type: 'mirror', enabled: true, amount: 45, secondary: 2, tertiary: 0 }] }),
+        ], 104),
+      },
+      {
+        id: 'mosaic-snow',
+        why: '(e) white ticks suspect: small snowflakes over mosaic',
+        project: mkProject({ kind: 'solid', color: '#1565c0' }, [
+          mkLayer('mosaic', { cols: 12, rows: 12 }, 105, { palette: ['#1565c0', '#64b5f6', '#e3f2fd'] }),
+          mkLayer('scatter', { shape: 'snowflake', count: 120, size: 10 }, 106, { palette: ['#ffffff', '#e3f2fd'], blend: 'screen', opacity: 0.9 }),
+        ], 105),
+      },
+      {
+        id: 'bokeh-rings',
+        why: '(b) ring outlines: bokeh ring shapes, forced (tame bypassed here)',
+        project: mkProject(DARK, [
+          mkLayer('bokeh', { shape: 'ring', count: 60, size: 60 }, 107, { palette: ['#c77dff', '#ffb3f0'], blend: 'screen', opacity: 0.7 }),
+        ], 107),
+      },
+    ]
+
+    const rows = []
+    const thumbs = []
+    for (const cs of cases) {
+      const out = await svc.requestRender(cs.project, () => {})
+      const ir = ex.compositeLayers(cs.project, out.results)
+      const m = cliffs(cv, ir, DARK)
+      rows.push({ id: cs.id, why: cs.why, ...m, nodes: out.count })
+      const tw = 300
+      const sc = tw / ir.w
+      const c = document.createElement('canvas')
+      cv.renderCanvas(ir, c, { scale: sc })
+      thumbs.push({ id: cs.id, w: c.width, h: c.height, url: c.toDataURL('image/png') })
+      await sleep(0)
+    }
+    return JSON.stringify({ rows, thumbs })
+  }
+
+  return Promise.race([work(), sleep(120000).then(() => 'TIMEOUT-120s')])
+})()

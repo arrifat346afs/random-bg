@@ -46,14 +46,14 @@ function fallbackProject(): Project {
 }
 
 function loadInitialProject(): Project {
-  let raw: string | null = null
+  let raw: string | null
   try {
     raw = loadRaw(KEYS.project)
   } catch {
     return fallbackProject()
   }
   if (!raw) return fallbackProject()
-  let saved: Project | null = null
+  let saved: Project | null
   try {
     saved = JSON.parse(raw) as Project
   } catch {
