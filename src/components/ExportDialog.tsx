@@ -166,7 +166,7 @@ export function ExportDialog({ open, onOpenChange }: Props) {
         setStatus({
           kind: res.warnings.length ? 'warn' : 'ok',
           msg:
-            `${res.filename} · ${fmtBytes(res.bytes)} · vector` +
+            `${res.filename} · ${res.width}×${res.height} · ${fmtBytes(res.bytes)} · vector` +
             (res.warnings.length ? ` · ${res.warnings.join(' ')}` : ''),
         })
       } else if (res.json) {
@@ -202,7 +202,11 @@ export function ExportDialog({ open, onOpenChange }: Props) {
   const copySource = async () => {
     if (!results) return
     if (format === 'svg') {
-      const { svg } = projectToSvg(project(), results, { flattenAdditive: flatten })
+      const { svg } = projectToSvg(project(), results, {
+        flattenAdditive: flatten,
+        background: includeBg ? project().canvas.bg : undefined,
+        scale: effScale,
+      })
       const ok = await copyText(svg)
       setStatus({ kind: ok ? 'ok' : 'warn', msg: ok ? 'SVG copied to clipboard' : 'Copy blocked' })
       return

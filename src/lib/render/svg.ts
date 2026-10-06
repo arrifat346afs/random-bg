@@ -41,6 +41,12 @@ export interface SvgRenderOpts {
   /** omit width/height (viewBox only) */
   viewboxOnly?: boolean
   /**
+   * Output-size multiplier for the `width`/`height` attributes.
+   * The `viewBox` always stays at the canvas size so the artwork itself is
+   * unchanged — a 2× SVG is the same vectors, just opened at 2× pixel size.
+   */
+  scale?: number
+  /**
    * Per-layer filter stacks, keyed by layer id. The IR only carries `Node.lid`
    * (which layer a node belongs to), so the actual params travel separately —
    * a node's geometry is cached and reused while its filters change.
@@ -335,7 +341,9 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
   }
 
   const allDefs = [...defs.values(), ...filters.values()].join('')
-  const wAttr = opts.viewboxOnly ? '' : ` width="${fmt(ir.w, 0)}" height="${fmt(ir.h, 0)}"`
+  const outW = Math.max(1, Math.round(ir.w * (opts.scale ?? 1)))
+  const outH = Math.max(1, Math.round(ir.h * (opts.scale ?? 1)))
+  const wAttr = opts.viewboxOnly ? '' : ` width="${outW}" height="${outH}"`
   const defsBlock = allDefs ? `<defs>${allDefs}</defs>` : ''
   // Only emitted when something needs it, so additive-free exports are unchanged.
   const styleBlock = hasAdditive ? `<style>.additive{mix-blend-mode:plus-lighter}</style>` : ''
