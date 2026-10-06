@@ -1,0 +1,88 @@
+/**
+ * scripts/_wallpaper-sheet.txt — 8 Flow waves seeds at 4K, downsampled.
+ *
+ * Template: the driver replaces `__SEEDS__`. Each seed renders one flowWaves
+ * layer (random params) at 3840x2160, measures white share + hue census +
+ * row-step stats, and returns a 480px thumb.
+ */
+(() => {
+  const SEEDS = __SEEDS__
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const work = async () => {
+    const [rz, ex, cv, svc, pal, rngM, projM, attach] = await Promise.all([
+      import('/src/lib/randomize.ts'),
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/canvas.ts'),
+      import('/src/lib/render/service.ts'),
+      import('/src/lib/palette.ts'),
+      import('/src/lib/rng.ts'),
+      import('/src/lib/project.ts'),
+      import('/src/lib/filters/attach.ts'),
+    ])
+    const rows = []
+    const thumbs = []
+    for (const seed of SEEDS) {
+      const rng = rngM.createRng(seed)
+      const layer = rz.randomLayer({ genId: 'flowWaves', rng })
+      const project = projM.createProject({ seed, layers: [] })
+      project.canvas = { w: 3840, h: 2160, bg: { kind: 'solid', color: '#0a0a10' } }
+      project.palette = { name: 'custom', colors: ['#14101f', '#3a2a5e', '#7b5fc0', '#c9a8e8'] }
+      layer.color = { mode: 'palette', palette: { name: 'custom', colors: project.palette.colors.slice() }, ramp: 'linear', axis: 45, invert: false, linked: true }
+      project.layers = [layer]
+      const out = await svc.requestRender(project, () => {})
+      const ir = ex.compositeLayers(project, out.results)
+      const c = document.createElement('canvas')
+      cv.renderCanvas(ir, c, { scale: 1, background: project.canvas.bg, filters: attach.projectFilterOpts(project) })
+      const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height).data
+      // white share + hue census + row max-step (middle row, strided)
+      let white = 0
+      const hueHist = new Array(12).fill(0)
+      const y = Math.floor(c.height * 0.55)
+      let prev = -1
+      let maxStep = 0
+      for (let x = 0; x < c.width; x += 2) {
+        const o = (y * c.width + x) * 4
+        const r = d[o], g = d[o + 1], b = d[o + 2]
+        if (r >= 250 && g >= 250 && b >= 250) white++
+        const mx = Math.max(r, g, b) / 255, mn = Math.min(r, g, b) / 255
+        const l = (mx + mn) / 2
+        let h = 0, s = 0
+        if (mx !== mn) {
+          const dd = mx - mn
+          s = l > 0.5 ? dd / (2 - mx - mn) : dd / (mx + mn)
+          if (mx === r / 255) h = ((g - b) / 255 / dd + (g < b ? 6 : 0)) * 60
+          else if (mx === g / 255) h = ((b - r) / 255 / dd + 2) * 60
+          else h = ((r - g) / 255 / dd + 4) * 60
+        }
+        hueHist[Math.min(11, Math.floor((((h % 360) + 360) % 360) / 30))] += s
+        const L = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        if (prev >= 0) maxStep = Math.max(maxStep, Math.abs(L - prev))
+        prev = L
+      }
+      const n = Math.ceil(c.width / 2)
+      let hueTotal = 0
+      for (const v of hueHist) hueTotal += v
+      let hues = 0
+      for (const v of hueHist) if (hueTotal > 0 && v / hueTotal > 0.03) hues++
+      rows.push({
+        seed,
+        bands: layer.params.bands,
+        variant: layer.params.variant,
+        white: +(white / n * 100).toFixed(2),
+        hues,
+        maxStep: +maxStep.toFixed(1),
+        nodes: out.count,
+      })
+      const t = document.createElement('canvas')
+      t.width = 480
+      t.height = 270
+      t.getContext('2d').drawImage(c, 0, 0, 480, 270)
+      thumbs.push({ seed, url: t.toDataURL('image/png') })
+      await sleep(0)
+    }
+    return JSON.stringify({ rows, thumbs })
+  }
+
+  return Promise.race([work(), sleep(290000).then(() => 'TIMEOUT-290s')])
+})()

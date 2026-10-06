@@ -341,9 +341,12 @@ export function randomDist(genId: string, rng: RNG): DistSpec {
 const MOD_CHANCE = 0.42
 
 function randomMods(genId: string, rng: RNG): ModifierSpec[] {
-  // a smooth field base is never standpoint-modified: displacing a handful of
-  // giant blobs only moves colour around, never improves it
-  if (genId === 'mesh') return []
+  // Smooth fields are never standpoint-modified: displacing a handful of
+  // giant blobs only moves colour around (mesh), and duplicating full-canvas
+  // wave bands (array/kaleido) breaks coverage into stacked white hard-edged
+  // copies. Wallpaper layers compose clean or not at all.
+  const family = getGenerator(genId)?.family
+  if (genId === 'mesh' || family === 'wallpaper') return []
   if (rng.next() > 0.72) return []
   const mods: ModifierSpec[] = []
   const candidates: ModType[] = ['noise', 'twist', 'kaleido', 'mirror', 'array', 'scaleByPos', 'colorByPos', 'axisFade', 'jitter']
