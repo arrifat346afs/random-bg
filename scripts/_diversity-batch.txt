@@ -1,0 +1,221 @@
+/**
+ * scripts/_diversity-batch.txt — in-page diversity measurement (template).
+ *
+ * Evaluated in the dev-server page via `scripts/cdp-eval.ts` (same pattern as
+ * `scripts/_quality20.txt`). The driver (`scripts/diversity.ts`) replaces the
+ * `__SEEDS__` placeholder with a JSON array of ~20 seeds before each call.
+ *
+ * For every seed it records:
+ *  • ungated `randomProject(seed)` — generator mix, palette, bg, raw params
+ *  • gated `randomProjectChecked(seed)` — every attempt (score/verdict/genes)
+ *    plus a 128 px descriptor of the accepted project:
+ *    generator/family ids, full-bleed flag, coverage, mean luma, dominant
+ *    hues + saturation, edge density, centre of mass, symmetry, 8x8x8 colour
+ *    histogram, background luma.
+ *
+ * NOTE: the gate runs with a generous wall-clock budget (30 s, 8 attempts) so
+ * the verdict is the gate's true decision, not a timing artefact. quality20's
+ * 750 ms budget can return best-effort on a slow machine; that would make this
+ * measurement non-deterministic run to run.
+ */
+(() => {
+  const SEEDS = __SEEDS__
+  const DW = 128
+  const FULLBLEED_IDS = ['mosaic', 'gradShapes', 'smoke', 'grain']
+  const STAND_IN = '#101014'
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  function lumaOf(h) {
+    const n = parseInt(h.replace('#', '').slice(0, 6), 16)
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+  }
+
+  function bgLumaOf(bg) {
+    if (!bg) return lumaOf(STAND_IN)
+    if (bg.kind === 'transparent') return lumaOf(STAND_IN)
+    if (bg.kind === 'gradient') return (lumaOf(bg.from) + lumaOf(bg.to)) / 2
+    return lumaOf(bg.color)
+  }
+
+  function rgbSatHue(r, g, b) {
+    const R = r / 255, G = g / 255, B = b / 255
+    const mx = Math.max(R, G, B), mn = Math.min(R, G, B)
+    const l = (mx + mn) / 2
+    let h = 0, s = 0
+    if (mx !== mn) {
+      const d = mx - mn
+      s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn)
+      if (mx === R) h = ((G - B) / d + (G < B ? 6 : 0)) * 60
+      else if (mx === G) h = ((B - R) / d + 2) * 60
+      else h = ((R - G) / d + 4) * 60
+    }
+    return [h, s]
+  }
+
+  /** 128 px descriptor of a composed IR over its own ground. */
+  function describe(cv, ir, bg) {
+    const sc = DW / Math.max(1, ir.w)
+    const bare = document.createElement('canvas')
+    cv.renderCanvas(ir, bare, { scale: sc })
+    const bw = bare.width, bh = bare.height, n = bw * bh
+    const bd = bare.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, bw, bh).data
+    const effBg = !bg || bg.kind === 'transparent' ? { kind: 'solid', color: STAND_IN } : bg
+    const prev = document.createElement('canvas')
+    cv.renderCanvas(ir, prev, { scale: sc, background: effBg })
+    const pd = prev.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, bw, bh).data
+
+    const lum = new Float32Array(n)
+    const hueHist = new Array(12).fill(0)
+    const hist = new Array(512).fill(0)
+    let covered = 0, sum = 0, satSum = 0, comX = 0, comY = 0, comW = 0
+    for (let y = 0; y < bh; y++) {
+      for (let x = 0; x < bw; x++) {
+        const i = y * bw + x, o = i * 4
+        const a = bd[o + 3]
+        if (a >= 8) covered++
+        const r = pd[o], g = pd[o + 1], b = pd[o + 2]
+        const L = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        lum[i] = L
+        sum += L
+        hist[((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5)]++
+        const [h, s] = rgbSatHue(r, g, b)
+        satSum += s
+        hueHist[Math.min(11, Math.floor((((h % 360) + 360) % 360) / 30))] += s * (a >= 8 ? 1 : 0.35)
+        comX += x * L
+        comY += y * L
+        comW += L
+      }
+    }
+    let edge = 0
+    const edgeN = Math.max(1, (bw - 1) * (bh - 1))
+    for (let y = 0; y < bh - 1; y++) {
+      for (let x = 0; x < bw - 1; x++) {
+        const i = y * bw + x
+        if (Math.abs(lum[i] - lum[i + 1]) + Math.abs(lum[i] - lum[i + bw]) > 30) edge++
+      }
+    }
+    let symD = 0
+    const half = Math.floor(bw / 2)
+    for (let y = 0; y < bh; y++) {
+      for (let x = 0; x < half; x++) symD += Math.abs(lum[y * bw + x] - lum[y * bw + (bw - 1 - x)])
+    }
+    const symPairs = Math.max(1, bh * half)
+    const order = hueHist.map((v, k) => [v, k * 30 + 15]).sort((p, q) => q[0] - p[0])
+    return {
+      w: bw,
+      h: bh,
+      coverage: +(covered / Math.max(1, n) * 100).toFixed(2),
+      meanLuma: +(sum / Math.max(1, n)).toFixed(2),
+      meanSat: +(satSum / Math.max(1, n)).toFixed(4),
+      hueTop: [Math.round(order[0][1]), Math.round(order[1][1])],
+      hueHist: hueHist.map((v) => +v.toFixed(2)),
+      edge: +(edge / edgeN).toFixed(4),
+      cx: comW > 0 ? +((comX / comW / Math.max(1, bw - 1))).toFixed(4) : 0.5,
+      cy: comW > 0 ? +((comY / comW / Math.max(1, bh - 1))).toFixed(4) : 0.5,
+      sym: +(1 - symD / symPairs / 255).toFixed(4),
+      hist,
+    }
+  }
+
+  const slimParams = (layers) =>
+    layers.map((l) => ({ gen: l.gen, params: l.params }))
+
+  const work = async () => {
+    const [rz, q, ex, cv, svc, gens] = await Promise.all([
+      import('/src/lib/randomize.ts'),
+      import('/src/lib/quality.ts'),
+      import('/src/lib/export.ts'),
+      import('/src/lib/render/canvas.ts'),
+      import('/src/lib/render/service.ts'),
+      import('/src/lib/generators/index.ts'),
+    ])
+    const famOf = new Map(gens.GENERATORS.map((g) => [g.id, g.family]))
+    const famsOf = (ids) => ids.map((id) => famOf.get(id) ?? '?')
+
+    const renderIR = async (project) => {
+      const out = await svc.requestRender(project, () => {})
+      return ex.compositeLayers(project, out.results)
+    }
+
+    const rows = []
+    for (const seed of SEEDS) {
+      const u = rz.randomProject(seed)
+      const uGenIds = u.layers.map((l) => l.gen)
+
+      const seen = []
+      let res
+      try {
+        res = await q.randomProjectChecked(
+          seed,
+          { attempts: 8, budgetMs: 30000 },
+          () => {},
+          (x) =>
+            seen.push({
+              genIds: x.project.layers.map((l) => l.gen),
+              ok: x.verdict.ok,
+              score: +x.verdict.score.toFixed(2),
+              cov: +x.metrics.coverage.toFixed(2),
+              luma: +x.metrics.meanLuma.toFixed(1),
+              nodes: x.metrics.nodes,
+              hard: x.verdict.hard.map((r) => r.code),
+              soft: x.verdict.soft.map((r) => r.code),
+            }),
+        )
+      } catch (e) {
+        rows.push({ seed, error: String((e && e.message) || e) })
+        continue
+      }
+      const p = res.project
+      const gGenIds = p.layers.map((l) => l.gen)
+      let desc = null
+      let uDesc = null
+      try {
+        desc = describe(cv, await renderIR(p), p.canvas.bg)
+        uDesc = describe(cv, await renderIR(u), u.canvas.bg)
+      } catch (e) {
+        rows.push({ seed, error: 'describe failed: ' + String((e && e.message) || e) })
+        continue
+      }
+      rows.push({
+        seed,
+        ungated: {
+          genIds: uGenIds,
+          fams: famsOf(uGenIds),
+          fullBleed: uGenIds.some((g) => FULLBLEED_IDS.includes(g)),
+          palette: p ? u.palette : u.palette,
+          bg: u.canvas.bg,
+          layers: slimParams(u.layers),
+          desc: uDesc,
+        },
+        gated: {
+          genIds: gGenIds,
+          fams: famsOf(gGenIds),
+          fullBleed: gGenIds.some((g) => FULLBLEED_IDS.includes(g)),
+          attempts: res.attempts,
+          budgetHit: res.budgetHit,
+          finalOk: res.verdict.ok,
+          score: +res.verdict.score.toFixed(2),
+          cov: +res.metrics.coverage.toFixed(2),
+          luma: +res.metrics.meanLuma.toFixed(1),
+          white: +res.metrics.whiteShare.toFixed(2),
+          contrast: +res.metrics.contrast.toFixed(1),
+          nodes: res.metrics.nodes,
+          hard: res.verdict.hard.map((r) => r.code),
+          soft: res.verdict.soft.map((r) => r.code),
+          palette: p.palette,
+          bg: p.canvas.bg,
+          bgLuma: +bgLumaOf(p.canvas.bg).toFixed(1),
+          layers: slimParams(p.layers),
+          desc,
+        },
+        attempts: seen,
+      })
+      await sleep(0)
+    }
+    return JSON.stringify({ rows })
+  }
+
+  return Promise.race([work(), sleep(290000).then(() => 'TIMEOUT-290s')])
+})()
