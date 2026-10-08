@@ -467,6 +467,7 @@ export interface RandomOpts {
    * Omitted → each attempt rolls its own size from the curated pool.
    */
   canvas?: { w: number; h: number }
+  pool?: import('./random-pool').RandomPoolPrefs
 }
 
 export interface CheckedRandom {
@@ -529,6 +530,7 @@ export async function randomProjectChecked(
       layers: opts.layers,
       bg: opts.bg,
       canvas: opts.canvas,
+      pool: opts.pool,
     })
     onProgress?.(i + 1, maxTries)
 
@@ -587,7 +589,7 @@ export async function randomProjectChecked(
 
   if (!best) {
     // unreachable in practice (the loop always runs once), but never return null
-    const project = randomProject(seed, { layers: opts.layers, bg: opts.bg })
+    const project = randomProject(seed, { layers: opts.layers, bg: opts.bg, pool: opts.pool })
     const out = await requestRender(project, () => {})
     const metrics = measureProject(project, out.results)
     return { project, metrics, verdict: judge(metrics), attempts: 1, budgetHit: true }

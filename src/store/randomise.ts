@@ -46,6 +46,7 @@ export async function randomise(opts: RandomOpts = {}): Promise<CheckedRandom | 
   const { project: current } = useProjectStore.getState()
   const roll: RandomOpts = {
     ...opts,
+    pool: opts.pool ?? useUiStore.getState().randomPool,
     canvas: useUiStore.getState().view.lockAspect
       ? { w: current.canvas.w, h: current.canvas.h }
       : undefined,

@@ -8,7 +8,7 @@
  */
 
 import type { IR } from './ir'
-import { buildIR } from './ir'
+import { buildIR, stripNodeBlur } from './ir'
 import { composeIR, type LayerResult } from './pipeline'
 import { renderCanvas, applyMotion, drawBackground, irToCanvas } from './render/canvas'
 import { renderSVG, type SvgRenderOpts } from './render/svg'
@@ -28,8 +28,12 @@ export interface ExportOptions {
   quality: number
   /** include the project background in the output */
   includeBackground: boolean
+  /** emit node blur (SVG <filter> / canvas blur / Stock vector expansion). Defaults to true. */
+  includeBlur?: boolean
   /** degrade plus-lighter → screen for strict SVG rasterisers */
   flattenAdditive?: boolean
+  /** Adobe Stock compatibility mode for SVG exports */
+  adobeCompat?: boolean
   filename?: string
 }
 
@@ -85,39 +89,93 @@ export function projectToSvg(
   opts: Partial<SvgRenderOpts> = {},
 ): { svg: string; ir: IR; warnings: string[] } {
   const ir = compositeLayers(project, results)
-  const rasterFilterIds = rasterFilteredLayers(project)
-  const ditherIds = ditheredLayers(project)
-  const rasterLayers = [...new Set([...rasterFilterIds, ...ditherIds])]
+  const stock = opts.adobeCompat ?? false
+  const rasterFilterIds = stock ? [] : rasterFilteredLayers(project)
+  const ditherIds = stock ? [] : ditheredLayers(project)
+  const mode = stock ? 'vector' : (opts.svgMode ?? 'vector')
+  // the embed raster is only needed when a mode will actually use it
+  const needsImage = !stock && (mode === 'image' || mode === 'hybrid' || rasterFilterIds.length > 0)
+  const rasterLayers =
+    needsImage
+      ? [...new Set([...rasterFilterIds, ...ditherIds])]
+      : !stock
+        ? [...rasterFilterIds]
+        : []
   const scale = opts.scale && Number.isFinite(opts.scale) && opts.scale > 0 ? opts.scale : 1
   // `exportProject` passes `background: undefined` when "include background" is
   // off. `'background' in opts` distinguishes that from older callers that pass
   // `{}` and still expect the canvas background.
   const background = 'background' in opts ? opts.background : project.canvas.bg
+  // Stock mode drops noise backgrounds to solid (no feTurbulence).
+  const stockBg =
+    stock && background && background.kind === 'noise'
+      ? { kind: 'solid' as const, color: background.color }
+      : background
   const svg = renderSVG(ir, {
-    background,
-    flattenAdditive: opts.flattenAdditive,
+    background: stockBg,
+    flattenAdditive: stock ? true : opts.flattenAdditive,
     decimals: opts.decimals ?? 2,
     viewboxOnly: opts.viewboxOnly,
     scale,
-    layerFilters: projectFilterOpts(project).layerFilters,
-    rasterImages: rasterLayers.length
-      ? rasterLayerImages(ir, project, rasterLayers, scale)
-      : undefined,
+    layerFilters: stock ? {} : projectFilterOpts(project).layerFilters,
+    rasterImages:
+      rasterLayers.length && !stock
+        ? rasterLayerImages(ir, project, rasterLayers, scale)
+        : undefined,
+    svgMode: mode,
+    ditheredLayerIds: new Set(ditherIds),
+    rasterFilteredIds: new Set(rasterFilterIds),
+    layerNames: Object.fromEntries(project.layers.map((l) => [l.id, l.name])),
+    adobeCompat: stock,
+    includeBlur: opts.includeBlur ?? true,
   })
   const warnings: string[] = []
-  if (ir.stats.additive && opts.flattenAdditive) {
-    warnings.push('`plus-lighter` was flattened to `screen` for renderer compatibility.')
-  }
-  if (rasterFilterIds.length > 0) {
+  const wantBlur = opts.includeBlur ?? true
+  if (!wantBlur && ir.stats.blurs > 0)
     warnings.push(
-      `${rasterFilterIds.length} layer${rasterFilterIds.length > 1 ? 's' : ''} with raster-only filter${rasterFilterIds.length > 1 ? 's' : ''} ` +
-        'embedded as an image.',
+      `Blur excluded by export toggle — ${ir.stats.blurs} blurred node(s) rendered sharp.`,
+    )
+  if (stock) {
+    if (wantBlur && ir.stats.blurs > 0)
+      warnings.push(
+        `${ir.stats.blurs} blurred node(s) expanded to pure-vector gradients/stacked strokes; no <filter> emitted.`,
+      )
+    const nonNormal = ir.nodes.filter((n) => n.blend && n.blend !== 'normal').length
+    if (nonNormal > 0 || ir.stats.additive)
+      warnings.push(
+        'Blend modes flattened to normal with opacity pre-composite; additive glow reads slightly flatter than the preview.',
+      )
+    const dropped = project.layers.filter((l) => (l.filters ?? []).some((f) => f.enabled)).length
+    if (dropped > 0 || background?.kind === 'noise')
+      warnings.push('Grain/noise filters and noise backgrounds dropped for pure-vector output.')
+    if (rasterFilteredLayers(project).length > 0)
+      warnings.push('Raster-only filter layers exported as vectors (unfiltered); use JPEG if the look diverges.')
+  } else {
+    if (ir.stats.additive && opts.flattenAdditive) {
+      warnings.push('`plus-lighter` was flattened to `screen` for renderer compatibility.')
+    }
+    if (rasterFilterIds.length > 0) {
+      warnings.push(
+        `${rasterFilterIds.length} layer${rasterFilterIds.length > 1 ? 's' : ''} with raster-only filter${rasterFilterIds.length > 1 ? 's' : ''} ` +
+          'embedded as an image.',
+      )
+    }
+  }
+  if (mode === 'vector' && ditherIds.length > 0) {
+    warnings.push(
+      `${ditherIds.length} smooth-field layer${ditherIds.length > 1 ? 's' : ''} exported as vectors ` +
+        '(dense OKLCH gradient stops; faint banding possible in some viewers).',
     )
   }
-  if (ditherIds.length > 0) {
+  if (mode === 'hybrid' && ditherIds.length > 0) {
+    warnings.push(
+      `${ditherIds.length} smooth-field layer${ditherIds.length > 1 ? 's' : ''}: vector shapes over one embedded dithered raster each.`,
+    )
+  }
+  if (mode === 'image' && ditherIds.length > 0) {
     warnings.push(
       `${ditherIds.length} smooth-field layer${ditherIds.length > 1 ? 's' : ''} embedded as an image ` +
-        '(SVG vectors cannot carry anti-banding dither; about 3 MB at 1080p and 11 MB at 4K as PNG, smooth when scaled).',
+        '(about 3 MB at 1080p, 11 MB at 4K as PNG; scales smoothly when the SVG is resized).',
     )
   }
   return { svg, ir, warnings }
@@ -185,16 +243,41 @@ export async function exportProject(
   }
 
   if (opts.format === 'svg') {
-    const svgScale =
-      opts.scale && Number.isFinite(opts.scale) && opts.scale > 0 ? opts.scale : 1
+    let svgScale = opts.scale && Number.isFinite(opts.scale) && opts.scale > 0 ? opts.scale : 1
+    const stockWarnings: string[] = []
+    if (opts.adobeCompat) {
+      // Stock rule: artboard (width/height attrs) ≥ 15.5 MP. viewBox stays at
+      // canvas size; only the output-size multiplier grows.
+      const need = Math.sqrt(15_500_000 / Math.max(1, project.canvas.w * project.canvas.h))
+      if (svgScale < need) {
+        stockWarnings.push(
+          `Scale raised to ${formatScale(need)}× so the artboard reaches 15.5 MP (${Math.round(project.canvas.w * need)}×${Math.round(project.canvas.h * need)}).`,
+        )
+        svgScale = need
+      }
+    }
     const { svg, ir, warnings } = projectToSvg(project, results, {
       flattenAdditive: opts.flattenAdditive,
       // SVG always carries its own background rect when requested
       background: bg,
       scale: svgScale,
+      adobeCompat: opts.adobeCompat,
+      includeBlur: opts.includeBlur ?? true,
     })
     const width = Math.max(1, Math.round(ir.w * svgScale))
     const height = Math.max(1, Math.round(ir.h * svgScale))
+    if (opts.adobeCompat) {
+      // ASCII, no @ or (1): stock sites reject those in filenames.
+      return {
+        format: 'svg',
+        svg,
+        bytes: new Blob([svg], { type: 'image/svg+xml' }).size,
+        width,
+        height,
+        filename: `${base}-stock.svg`,
+        warnings: [...stockWarnings, ...warnings],
+      }
+    }
     const suffix = svgScale !== 1 ? `@${formatScale(svgScale)}x` : ''
     return {
       format: 'svg',
@@ -209,7 +292,17 @@ export async function exportProject(
 
   // raster
   const { scale, warnings } = clampScale(project.canvas.w, project.canvas.h, opts.scale)
-  const ir = compositeLayers(project, results)
+  const composed = compositeLayers(project, results)
+  // Blur toggle: sharp raster export without touching the preview.
+  const wantBlur = opts.includeBlur ?? true
+  const ir =
+    wantBlur || composed.stats.blurs === 0
+      ? composed
+      : buildIR(composed.w, composed.h, stripNodeBlur(composed.nodes))
+  if (!wantBlur && composed.stats.blurs > 0)
+    warnings.push(
+      `Blur excluded by export toggle — ${composed.stats.blurs} blurred node(s) rendered sharp.`,
+    )
   const canvas = document.createElement('canvas')
   renderCanvas(ir, canvas, { scale, background: bg, filters: projectFilterOpts(project) })
 

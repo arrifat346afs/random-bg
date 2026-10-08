@@ -58,6 +58,42 @@ Two rules the SVG backend follows because of this table:
   attributes in the cascade. Renderers ignoring the stylesheet degrade to
   `screen` rather than losing the blend.
 
+## Adobe Stock ready mode (filter-free, blend-free vector)
+
+On by default for SVG. `renderSVG(..., { adobeCompat: true })` rewrites the IR
+before serialising (`src/lib/render/stock.ts`), and `scripts/stock-profile.ts`
+is the structural gate (16/16 generators pass: zero `<filter>`, `filter=`,
+`fe*`, `mix-blend-mode`, `isolation`, `<style>`, `class=`, `style=`,
+`<image>`). Measured 2026-10-07: worst expansions are `particles`
+(812→4270 nodes, 494 blurs) and `bokeh` (480→3216, 432 blurs); files stay
+<700 KB.
+
+- **Blur → pure vector.** Solid blurred discs become one `radialGradient`
+  with `r + 3σ` and ≥24 stops sampling
+  `alpha(d) = 0.5·erfc((d−r)/(σ√2))` (unit-tested to 3% in
+  `src/lib/render/stock.test.ts`). Strokes/paths become 6–10 stacked round
+  strokes (`w + k·σ`, Gaussian opacities); filled shapes keep the sharp fill
+  plus stacked outer halo strokes; rects/bands use the stacked-offset form.
+  `viewBox` is untouched.
+- **Blends → normal.** `plus-lighter`/`screen`/`lighten`/`color-dodge`/`overlay`/
+  `soft-light` flatten to `normal` with an opacity pre-composite (0.7–0.9×);
+  all other non-normal blends flatten to `normal`. Additive glow reads
+  slightly flatter than the preview — that delta is the documented cost of a
+  Stock-accepted file, and the export dialog says so.
+- **Grain dropped.** Layer filter stacks are ignored in this mode, noise
+  backgrounds degrade to their solid ground, and raster-only filter layers
+  export as unfiltered vectors. When `toStockIR` reports blends/flattens, the
+  dialog shows "cannot be converted faithfully — JPEG keeps the preview look"
+  with a one-click switch to JPEG.
+- **Artboard/filename.** Scale auto-raises so `width×height ≥ 15.5 MP`;
+  filenames are ASCII `-stock.svg` (no `@`/`(1)`); no `xmlns:xlink`, no editor
+  metadata, single `<svg>` root.
+- **Pixel parity is renderer-gated, not claimed.** Mean-abs-diff ≤ 6/255 at
+  1080p per preset requires resvg/librsvg + canvas in the same harness (see
+  `scripts/filters-parity.ts`); until that run lands, treat the halo-heavy
+  rows above (`particles`, `bokeh`, `ribbons`) as the must-check-first set.
+  No success is declared here — numbers above are the current measurement.
+
 ## Filters
 
 The per-layer filter stack compiles to **one** `<filter>` with chained
@@ -96,6 +132,13 @@ the canvas side. Where they genuinely differ:
   resolution. Both are heuristics, not guarantees.
 
 ## Randomiser and quality gate
+
+- **The Randomise pool is user-controllable (TopBar → Pool).** Generators,
+  background kinds, light backgrounds, filters, additive blends and blur each
+  have a toggle (persisted, everything on = previous behaviour). Blur-off rolls
+  a `noBlur` project: `composeIR` strips every node's blur, so preview and all
+  exports render sharp, and blur filters are excluded from random stacks.
+  Applies to new rolls (mutate/breed inherit the flag via clone).
 
 - **The randomiser never invents a canvas ratio.** Sizes come from one curated
   list of coherent pairs (`RANDOM_CANVAS_SIZES`), not two independent pools —

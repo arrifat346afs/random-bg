@@ -108,6 +108,7 @@ export const SECTION_LABEL: Record<string, string> = {
   depth: 'Depth & focus',
   motion: 'Motion',
   mask: 'Mask',
+  camera: 'Camera',
 }
 
 /* ---- Emission ----------------------------------------------------------- */

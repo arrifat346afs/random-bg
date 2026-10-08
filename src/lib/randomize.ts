@@ -17,6 +17,8 @@ import { randomFilterStack, resampleFilterStack } from './filters/random'
 import { ensureFilters } from './filters/stack'
 import { DIST_OPTIONS, defaultDist, type DistSpec, type Layer, type ModifierSpec, type Params, type Project, type ModType, type ParamDef, type ParamValue } from './schema'
 import type { BlendMode } from './ir'
+import type { RandomPoolPrefs } from './random-pool'
+import { allowedBgKinds, allowedGenIds } from './random-pool'
 
 /* ---- Curated sampling tables ------------------------------------------- */
 
@@ -44,6 +46,12 @@ const DIST_WEIGHTS: Record<string, Partial<Record<DistSpec['type'], number>>> = 
   // mosaic covers the whole grid itself; the dist only seeds ribbon-style
   // anchors, so any choice behaves the same — uniform keeps it cheap
   mosaic: { uniform: 6 },
+  // network places its own 3D nodes; the dist only seeds the cloud layout —
+  // clumpy distributions give clumps, anything else falls back internally
+  network: { clustered: 3, gaussian: 3, noiseMask: 2.5, uniform: 2, radial: 1.5, poisson: 1 },
+  // surface3d places its own grid; the dist only tints accents —
+  // uniform keeps it cheap
+  surface3d: { uniform: 6 },
 }
 
 /** Blend modes that consistently look good as a layer blend. */
@@ -92,6 +100,47 @@ const BACKGROUND_POOL = (): Project['canvas']['bg'][] => [
   ...DARK_BACKGROUND_POOL(),
   ...LIGHT_BGS.map((color) => ({ kind: 'solid' as const, color })),
 ]
+
+function poolBackgrounds(pool: RandomPoolPrefs): Project['canvas']['bg'][] {
+  const kinds = new Set(allowedBgKinds(pool))
+  return BACKGROUND_POOL().filter((bg) => {
+    if (bg.kind === 'solid') {
+      const light = LIGHT_BGS.includes(bg.color)
+      if (light && !pool.allowLightBg) return false
+      return kinds.has('solid')
+    }
+    if (bg.kind === 'gradient') return kinds.has('gradient')
+    if (bg.kind === 'transparent') return kinds.has('transparent')
+    if (bg.kind === 'noise') return kinds.has('noise')
+    return true
+  })
+}
+
+/** Dark, opaque grounds for the tech-network recipe (glow needs darkness). */
+function darkOpaquePool(pool?: RandomPoolPrefs): Project['canvas']['bg'][] {
+  const kinds = pool ? new Set(allowedBgKinds(pool)) : null
+  const dark = DARK_BACKGROUND_POOL().filter((bg) => bg.kind !== 'transparent')
+  if (!kinds) return dark
+  const out = dark.filter((bg) => {
+    if (bg.kind === 'solid') return kinds.has('solid')
+    if (bg.kind === 'gradient') return kinds.has('gradient')
+    if (bg.kind === 'noise') return kinds.has('noise')
+    return true
+  })
+  return out.length > 0 ? out : dark
+}
+
+function forceDarkBackground(
+  _wanted: Project['canvas']['bg'],
+  palette: Palette,
+  layers: Layer[],
+  rng: RNG,
+): Project['canvas']['bg'] {
+  const pool = DARK_BACKGROUND_POOL()
+  const picked = pool[rng.int(0, pool.length - 1)]
+  // still run pairing so a pathological palette/layers combo stays readable
+  return pairBackground(picked, palette, layers, rng)
+}
 
 /* ---- Brightness budget ---------------------------------------------------
  * Additive layers are the only reliable way to blow out a canvas:
@@ -368,6 +417,18 @@ export function randomizeParams(
 
 const ALL_DISTS = DIST_OPTIONS.map((d) => d.value)
 
+/** Filter-stack types that soften via blur (excluded when the pool bans blur). */
+export const BLUR_FILTER_TYPES: ReadonlySet<string> = new Set([
+  'gaussian-blur',
+  'feather',
+  'outer-glow',
+  'inner-glow',
+  'drop-shadow',
+  'motion-blur',
+  'radial-blur',
+  'zoom-blur',
+])
+
 export function randomDist(genId: string, rng: RNG): DistSpec {
   const weights = DIST_WEIGHTS[genId] ?? {}
   const items = ALL_DISTS.filter((d) => (weights[d] ?? 0.4) > 0)
@@ -409,6 +470,8 @@ export function randomDist(genId: string, rng: RNG): DistSpec {
   }
 
   // shared shaping — the things that make distributions feel "designed"
+  // (depth-driven blur is stripped at compose time for blur-banned projects,
+  // so depth keeps shaping size/opacity here regardless of the pool)
   dist.depth = rng.next() < 0.75 ? rng.range(0.15, 0.75) : rng.range(0, 0.15)
   dist.sizePower = rng.pick([0.6, 0.8, 1, 1, 1.3, 1.8, 2.4])
   dist.sizeMin = rng.range(0.25, 0.7)
@@ -469,11 +532,12 @@ export interface LayerSampleOpts {
   palette?: Palette
   rng: RNG
   strength?: number
+  pool?: RandomPoolPrefs
 }
 
 export function randomLayer(opts: LayerSampleOpts): Layer {
-  const { rng } = opts
-  const genId = opts.genId ?? pickGenerator(rng)
+  const { rng, pool } = opts
+  const genId = opts.genId ?? pickGenerator(rng, pool)
   const gen = getGenerator(genId)
   const palette = opts.palette ?? generatePalette(rng)
   const layerSeed = Math.floor(rng.next() * 1e9)
@@ -487,7 +551,9 @@ export function randomLayer(opts: LayerSampleOpts): Layer {
   layer.locks = locks
   layer.dist = randomDist(genId, rng)
   layer.mods = randomMods(genId, rng)
-  layer.blend = rng.weighted(GOOD_BLENDS, GOOD_BLENDS.map((b) => (b === 'normal' ? 2.4 : 1)))
+  const blends: BlendMode[] =
+    pool && !pool.allowAdditiveBlends ? ['normal', 'multiply', 'darken', 'normal'] : GOOD_BLENDS
+  layer.blend = rng.weighted(blends, blends.map((b) => (b === 'normal' ? 2.4 : 1)))
   layer.opacity = opacityFor(layer.blend, rng)
   layer.color = {
     mode: rng.weighted(
@@ -513,12 +579,22 @@ export function randomLayer(opts: LayerSampleOpts): Layer {
   // *post-process*, so it must not steal draws from the stream that makes the
   // artwork. Drawing here inline silently re-rolled every shape, palette and
   // canvas size for every existing seed the first time filters landed.
-  layer.filters = getGenerator(genId)?.family === 'wallpaper' ? [] : randomFilterStack(rng.fork('filters', layerSeed))
+  layer.filters =
+    getGenerator(genId)?.family === 'wallpaper' || pool?.allowFilters === false
+      ? []
+      : randomFilterStack(rng.fork('filters', layerSeed)).filter(
+          (f) => pool?.allowBlur !== false || !BLUR_FILTER_TYPES.has(f.type),
+        )
   layer.filtersBypassed = false
   tameWallpaper(layer)
   tameScatter(layer, rng.fork('tame', layerSeed), 0.8)
   tameRings(layer, rng.fork('rings', layerSeed))
   softenRays(layer, rng.fork('softrays', layerSeed))
+  tameNetwork(layer, rng.fork('tame3d', layerSeed))
+  tameSurface3d(layer, rng.fork('tame3d', layerSeed))
+  if (pool?.allowAdditiveBlends === false && layer.blend !== 'normal' && layer.blend !== 'multiply' && layer.blend !== 'darken') {
+    layer.blend = 'normal'
+  }
   litScatter(layer)
   return layer
 }
@@ -576,6 +652,86 @@ export function tameScatter(layer: Layer, rng: RNG, p: number): void {
 }
 
 /**
+ * Keep a randomised network layer legible: the focal plane stays inside the
+ * depth range, lines never fall below a visible floor, and the minimal MST
+ * wiring is dealt rarely (it reads sparse next to fuller graphs — presets
+ * and the inspector keep it on demand). Pure clamps plus one forked draw,
+ * so other seeds' artwork streams are untouched.
+ */
+function tameNetwork(layer: Layer, rng: RNG): void {
+  if (layer.gen !== 'network') return
+  const params = { ...layer.params }
+  const focal = params.focal
+  if (typeof focal === 'number') params.focal = Math.max(0.2, Math.min(0.8, focal))
+  const lineOpacity = params.lineOpacity
+  if (typeof lineOpacity === 'number') params.lineOpacity = Math.max(lineOpacity, 0.28)
+  const width = params.lineWidth
+  if (typeof width === 'number') params.lineWidth = Math.max(width, 0.8)
+  const maxEdgeLen = params.maxEdgeLen
+  if (typeof maxEdgeLen === 'number') params.maxEdgeLen = Math.max(maxEdgeLen, 0.2)
+  const size = params.size
+  if (typeof size === 'number') params.size = Math.max(size, 5.5)
+  const fog = params.fog
+  if (typeof fog === 'number') params.fog = Math.min(fog, 0.55)
+  const dof = params.dof
+  if (typeof dof === 'number') params.dof = Math.min(dof, 0.8)
+  if (params.connection === 'mst' && rng.next() < 0.8) {
+    params.connection = rng.pick(['knn', 'knn', 'gabriel', 'radius'])
+  }
+  // ribbon bands, constellations and small globes are sparse by design —
+  // beautiful as presets, but they read blank at thumbnail scale, so deal
+  // them rarely
+  if ((params.layout === 'ribbon' || params.layout === 'constellation') && rng.next() < 0.7) {
+    params.layout = rng.pick(['cloud', 'cloud', 'wave', 'globe', 'grid'])
+  }
+  if (params.layout === 'globe' && rng.next() < 0.5) {
+    params.layout = rng.pick(['cloud', 'cloud', 'wave', 'grid'])
+  }
+  pleasantPitch(params)
+  layer.params = params
+  // a nearly-transparent layer is invisible at any scale (precedent:
+  // softenRays also owns blend+opacity) — floor it into visibility
+  if (layer.opacity < 0.6) layer.opacity = 0.6
+}
+
+/**
+ * Pleasant camera angles for 3D layers: low or oblique, never edge-on and
+ * never straight top-down; kept centred so the content stays in frame.
+ * Pure clamps (no RNG).
+ */
+function pleasantPitch(params: Params): void {
+  const pitch = params.pitch
+  if (typeof pitch === 'number') params.pitch = Math.max(12, Math.min(68, pitch))
+  const yaw = params.yaw
+  if (typeof yaw === 'number') params.yaw = Math.max(-22, Math.min(22, yaw))
+  const lookX = params.lookX
+  if (typeof lookX === 'number') params.lookX = Math.max(-0.08, Math.min(0.08, lookX))
+  const lookY = params.lookY
+  if (typeof lookY === 'number') params.lookY = Math.max(-0.08, Math.min(0.08, lookY))
+  const camHeight = params.camHeight
+  if (typeof camHeight === 'number') params.camHeight = Math.max(-0.12, Math.min(0.12, camHeight))
+}
+
+/**
+ * Keep a randomised Surface 3D layer calm and legible: pleasant camera,
+ * restrained resolution, and the sparse contour structure dealt rarely
+ * (thin iso-lines read blank at thumbnail scale). Forked draw only.
+ */
+function tameSurface3d(layer: Layer, rng: RNG): void {
+  if (layer.gen !== 'surface3d') return
+  const params = { ...layer.params }
+  pleasantPitch(params)
+  const res = params.resolution
+  if (typeof res === 'number') params.resolution = Math.max(36, Math.min(res, 64))
+  const fog = params.fog
+  if (typeof fog === 'number') params.fog = Math.min(fog, 0.65)
+  if (params.structure === 'contours' && rng.next() < 0.85) {
+    params.structure = rng.pick(['tri', 'tri', 'dots', 'quad', 'hex'])
+  }
+  layer.params = params
+}
+
+/**
  * Bokeh `ring` outlines at low alpha read as stray ellipse artefacts rather
  * than intentional optics. Keep the shape in the pool but deal it rarely —
  * most ring rolls become soft filled discs.
@@ -606,24 +762,27 @@ export function softenRays(layer: Layer, rng: RNG): void {
   layer.opacity = Number(rng.range(0.35, 0.75).toFixed(3))
 }
 
-export function pickGenerator(rng: RNG): string {
+export function pickGenerator(rng: RNG, prefs?: RandomPoolPrefs): string {
   // read the registry weights so adding a family or re-weighting one place
   // updates every roll; previously this hardcoded a copy of the table.
   // Learned taste multiplies in: family weights scale by member mean,
   // within-family picks weight by per-generator multiplier (1 = neutral).
-  const families = FAMILY_WEIGHTS.map(([f]) => f)
-  const weights = FAMILY_WEIGHTS.map(([f, w]) => {
-    const members = GENERATORS.filter((g) => g.family === f)
-    const mean =
-      members.length > 0
-        ? members.reduce((s, g) => s + genMult(g.id), 0) / members.length
-        : 1
-    return w * Math.max(0.5, Math.min(2, mean))
-  })
-  const family = rng.weighted(families, weights)
-  const pool = GENERATORS.filter((g) => g.family === family)
-  if (!pool.length) return rng.pick(GENERATORS).id
-  return rng.weighted(pool, pool.map((g) => genMult(g.id))).id
+  const allowed = prefs ? new Set(allowedGenIds(prefs)) : null
+  const gens = allowed ? GENERATORS.filter((g) => allowed.has(g.id)) : GENERATORS
+  const pool = gens.length > 0 ? gens : GENERATORS
+  const famWeights = new Map<string, number>()
+  for (const [f, w] of FAMILY_WEIGHTS) {
+    const members = pool.filter((g) => g.family === f)
+    if (members.length === 0) continue
+    const mean = members.reduce((s, g) => s + genMult(g.id), 0) / members.length
+    famWeights.set(f, w * Math.max(0.5, Math.min(2, mean)))
+  }
+  const families = [...famWeights.keys()]
+  if (families.length === 0) return rng.pick(GENERATORS).id
+  const family = rng.weighted(families, families.map((f) => famWeights.get(f) ?? 1))
+  const members = pool.filter((g) => g.family === family)
+  if (!members.length) return rng.pick(pool).id
+  return rng.weighted(members, members.map((g) => genMult(g.id))).id
 }
 
 /**
@@ -649,13 +808,88 @@ const genMult = (id: string): number => {
  * `glyph`/`snow` generator in the registry; the snowflake *shape* lives in
  * scatter and is covered by `tameScatter`.
  */
-const BUSY_GEN_IDS: ReadonlySet<string> = new Set(['particles', 'scatter', 'mosaic', 'bokeh'])
+const BUSY_GEN_IDS: ReadonlySet<string> = new Set(['particles', 'scatter', 'mosaic', 'bokeh', 'network', 'surface3d'])
 /** Full-bleed pattern layers (cover the canvas edge to edge). */
-const PATTERN_GEN_IDS: ReadonlySet<string> = new Set(['mosaic', 'gradShapes', 'smoke', 'grain'])
+const PATTERN_GEN_IDS: ReadonlySet<string> = new Set(['mosaic', 'gradShapes', 'smoke', 'grain', 'surface3d'])
 /** Chance the base (first) layer is drawn from the surface family. */
 const SURFACE_BASE_CHANCE = 0.65
 /** Chance a mosaic roll is kept as the base layer (cap ≈ 10%). */
 const MOSAIC_BASE_KEEP = 0.1
+/** Share of rolls dealt the curated tech-network composition. */
+const TECH_NETWORK_CHANCE = 0.2
+
+/** Share of rolls dealt the curated 3D-tech composition. */
+const TECH3D_CHANCE = 0.12
+
+/**
+ * Curated "3D tech" composition: a dark gradient ground, one 3D generator
+ * (surface or network cloud) with a pleasant low/oblique camera, and a very
+ * subtle smoke atmosphere. Owns every layer, so busy generators can never
+ * combine with it.
+ */
+function tech3dLayers(rng: RNG, palette: Palette, pool?: RandomPoolPrefs): Layer[] {
+  const allowed = pool ? new Set(allowedGenIds(pool)) : null
+  const has = (id: string): boolean => !allowed || allowed.has(id)
+  const cands = ['surface3d', 'network'].filter(has)
+  if (!cands.length) return []
+  const layers: Layer[] = []
+  // network look leads: that is the background most users ask for
+  const heroId = rng.next() < 0.6 ? (has('network') ? 'network' : cands[0]) : rng.pick(cands)
+  const hero = randomLayer({ genId: heroId, palette, rng, pool })
+  // pleasant cameras only: low or oblique, centred, close enough to fill
+  // the frame; glow layers composite normally or additively, never darkened
+  const hp = { ...hero.params }
+  hp.pitch = rng.range(15, 60)
+  hp.distance = rng.range(1.0, 1.7)
+  hp.fov = rng.range(40, 60)
+  hp.roll = rng.range(-10, 10)
+  hp.lookX = rng.range(-0.08, 0.08)
+  hp.lookY = rng.range(-0.08, 0.08)
+  hero.params = hp
+  if (hero.blend !== 'normal' && hero.blend !== 'screen' && hero.blend !== 'plus-lighter') {
+    hero.blend = 'normal'
+  }
+  hero.opacity = Math.max(hero.opacity, 0.7)
+  tameNetwork(hero, rng)
+  tameSurface3d(hero, rng)
+  layers.push(hero)
+  if (has('smoke') && rng.next() < 0.5) {
+    const haze = randomLayer({ genId: 'smoke', palette, rng, pool })
+    const a = haze.params.alpha
+    if (typeof a === 'number') haze.params = { ...haze.params, alpha: Math.min(a, 0.1) }
+    haze.opacity = Math.min(haze.opacity, 0.5)
+    layers.push(haze)
+  }
+  return layers
+}
+
+/**
+ * Curated "tech network" composition: a mesh-gradient base (or nothing — a
+ * dark ground carries it instead), one network layer, and an optional
+ * whisper of smoke atmosphere. Contains no busy generator by construction.
+ */
+function techNetworkLayers(rng: RNG, palette: Palette, pool?: RandomPoolPrefs): Layer[] {
+  const allowed = pool ? new Set(allowedGenIds(pool)) : null
+  const has = (id: string): boolean => !allowed || allowed.has(id)
+  const layers: Layer[] = []
+  // mesh base only when the palette is dark enough to stay a dark ground —
+  // a pastel mesh would wash out the whole recipe
+  const paletteLuma =
+    palette.colors.reduce((s, c) => s + lumaOf(c), 0) / Math.max(1, palette.colors.length)
+  if (has('mesh') && paletteLuma < 110 && rng.next() < 0.55) {
+    layers.push(randomLayer({ genId: 'mesh', palette, rng, pool }))
+  }
+  layers.push(randomLayer({ genId: 'network', palette, rng, pool }))
+  tameNetwork(layers[layers.length - 1], rng)
+  if (has('smoke') && rng.next() < 0.35) {
+    const haze = randomLayer({ genId: 'smoke', palette, rng, pool })
+    const a = haze.params.alpha
+    if (typeof a === 'number') haze.params = { ...haze.params, alpha: Math.min(a, 0.12) }
+    haze.opacity = Math.min(haze.opacity, 0.6)
+    layers.push(haze)
+  }
+  return layers
+}
 
 /**
  * Generator pick with composition rules: surface base by default, the busy
@@ -668,15 +902,21 @@ export function pickRuled(
   busyUsed: boolean,
   patternUsed: boolean,
   used: ReadonlySet<string>,
+  prefs?: RandomPoolPrefs,
 ): string {
+  const allowed = prefs ? new Set(allowedGenIds(prefs)) : null
+  const allIds = GENERATORS.map((g) => g.id)
+  const ok = (id: string) => !allowed || allowed.has(id)
   for (let tries = 0; tries < 8; tries++) {
     let id: string
     if (isBase && rng.next() < SURFACE_BASE_CHANCE) {
       // calm bases: surface fields and wallpaper flows carry the base layer
-      const pool = GENERATORS.filter((g) => g.family === 'surface' || g.family === 'wallpaper')
-      id = pool.length ? rng.weighted(pool, pool.map((g) => genMult(g.id))).id : pickGenerator(rng)
+      const pool = GENERATORS.filter(
+        (g) => (g.family === 'surface' || g.family === 'wallpaper') && ok(g.id),
+      )
+      id = pool.length ? rng.weighted(pool, pool.map((g) => genMult(g.id))).id : pickGenerator(rng, prefs)
     } else {
-      id = pickGenerator(rng)
+      id = pickGenerator(rng, prefs)
     }
     // avoid the same generator twice more than once — except rays, which
     // stacks additively and must never double up unless a recipe asks
@@ -691,13 +931,14 @@ export function pickRuled(
   }
   // last resort: never break the busy rule — pick among the admissible ids
   // (a lone mosaic is both busy and pattern on one layer, which is allowed)
-  const safe = GENERATORS.map((g) => g.id).filter(
+  const safe = allIds.filter(
     (id) =>
+      ok(id) &&
       !(BUSY_GEN_IDS.has(id) && busyUsed) &&
       !(BUSY_GEN_IDS.has(id) && patternUsed) &&
       !(PATTERN_GEN_IDS.has(id) && busyUsed),
   )
-  return safe.length ? rng.pick(safe) : pickGenerator(rng)
+  return safe.length ? rng.pick(safe) : pickGenerator(rng, prefs)
 }
 
 /**
@@ -763,6 +1004,7 @@ export interface RandomProjectOpts {
    * `structuredClone`.
    */
   canvas?: { w: number; h: number }
+  pool?: RandomPoolPrefs
 }
 
 export function randomProject(seed?: number, opts: RandomProjectOpts = {}): Project {
@@ -777,16 +1019,38 @@ export function randomProject(seed?: number, opts: RandomProjectOpts = {}): Proj
   let busyUsed = false
   let patternUsed = false
 
-  for (let i = 0; i < nLayers; i++) {
-    const isBase = i === 0
-    const genId = pickRuled(rng, isBase, busyUsed, patternUsed, used)
-    used.add(genId)
-    if (BUSY_GEN_IDS.has(genId)) busyUsed = true
-    if (PATTERN_GEN_IDS.has(genId)) patternUsed = true
-    const layer = randomLayer({ genId, palette, rng })
-    // cutesy scatter is never the main layer
-    if (isBase) tameScatter(layer, rng.fork('tame-base', layer.seedOffset), 1)
-    layers.push(layer)
+  // Curated "tech network" recipe (~10%): mesh-gradient or dark base plus
+  // one network layer plus a whisper of atmosphere. The recipe owns every
+  // layer, so busy generators (particles, mosaic, scatter, …) can never
+  // combine with it. Forked: the decision draw never shifts the artwork
+  // stream of any other seed.
+  const poolAllowed = opts.pool ? new Set(allowedGenIds(opts.pool)) : null
+  const deal3d =
+    !opts.layers &&
+    (!poolAllowed || poolAllowed.has('surface3d') || poolAllowed.has('network')) &&
+    rng.fork('tech3d-recipe').next() < TECH3D_CHANCE
+  const dealTech =
+    !opts.layers &&
+    !deal3d &&
+    (!poolAllowed || poolAllowed.has('network')) &&
+    rng.fork('tech-recipe').next() < TECH_NETWORK_CHANCE
+
+  if (deal3d) {
+    layers.push(...tech3dLayers(rng, palette, opts.pool))
+  } else if (dealTech) {
+    layers.push(...techNetworkLayers(rng, palette, opts.pool))
+  } else {
+    for (let i = 0; i < nLayers; i++) {
+      const isBase = i === 0
+      const genId = pickRuled(rng, isBase, busyUsed, patternUsed, used, opts.pool)
+      used.add(genId)
+      if (BUSY_GEN_IDS.has(genId)) busyUsed = true
+      if (PATTERN_GEN_IDS.has(genId)) patternUsed = true
+      const layer = randomLayer({ genId, palette, rng, pool: opts.pool })
+      // cutesy scatter is never the main layer
+      if (isBase) tameScatter(layer, rng.fork('tame-base', layer.seedOffset), 1)
+      layers.push(layer)
+    }
   }
 
   // at most one texture layer, placed on top
@@ -800,9 +1064,22 @@ export function randomProject(seed?: number, opts: RandomProjectOpts = {}): Proj
   // bring any over-budget additive stack back under control, then choose a
   // ground that the content can actually be seen on
   const built = brightnessBudget(layers)
+  const poolBg = opts.pool ? poolBackgrounds(opts.pool) : BACKGROUND_POOL()
   const wanted: Project['canvas']['bg'] =
-    opts.bg === false ? { kind: 'transparent' } : rng.pick(BACKGROUND_POOL())
-  const bg = opts.bg === false ? wanted : pairBackground(wanted, palette, built, rng)
+    opts.bg === false
+      ? { kind: 'transparent' }
+      : dealTech || deal3d
+        ? rng.pick(darkOpaquePool(opts.pool))
+        : rng.pick(poolBg.length > 0 ? poolBg : BACKGROUND_POOL())
+  // The recipe needs its dark ground: a transparent pick (legal elsewhere)
+  // would leave glow nodes floating on whatever page they land on.
+  const bg0 =
+    opts.bg === false
+      ? wanted
+      : opts.pool?.allowLightBg === false
+        ? forceDarkBackground(wanted, palette, built, rng)
+        : pairBackground(wanted, palette, built, rng)
+  const bg = (dealTech || deal3d) && opts.bg !== false && bg0.kind === 'transparent' ? rng.pick(darkOpaquePool(opts.pool)) : bg0
 
   // locked → the caller's exact size; otherwise one curated coherent pair.
   // Ternary rather than `?? rng.pick(...)` so a locked roll draws nothing
@@ -829,6 +1106,12 @@ export function randomProject(seed?: number, opts: RandomProjectOpts = {}): Proj
       speed: rng.range(0.6, 1.6),
     },
   }
+
+  // Blur-banned pool: flag the project so composeIR strips every node's blur
+  // (preview, exports, gate all read the composed IR). Generator-baked blur
+  // has no central parameter switch, so the flag — not param fiddling — is
+  // what makes the guarantee hold.
+  if (opts.pool?.allowBlur === false) project.noBlur = true
 
   // taste discipline, applied last so it sees the final ground. Pure value
   // transforms (no RNG): existing seeds keep their shapes and palettes, only

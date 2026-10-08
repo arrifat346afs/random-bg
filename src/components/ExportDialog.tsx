@@ -28,6 +28,8 @@ import { useProjectStore } from '@/store/projectStore'
 import { useRenderStore } from '@/store/renderStore'
 import { useUiStore } from '@/store/uiStore'
 import { rasterFilteredLayers } from '@/lib/filters/attach'
+import { checkStockSvg, stockPasses } from '@/lib/render/stock-check'
+import { toStockIR } from '@/lib/render/stock'
 import { FallbackBox } from './export/FallbackBox'
 import { FormatPicker } from './export/FormatPicker'
 import { Row } from './export/Row'
@@ -51,6 +53,9 @@ export function ExportDialog({ open, onOpenChange }: Props) {
   const quality = useUiStore((s) => s.exportQuality)
   const includeBg = useUiStore((s) => s.exportIncludeBg)
   const flatten = useUiStore((s) => s.exportFlatten)
+  const adobeCompat = useUiStore((s) => s.exportAdobeCompat)
+  const includeBlur = useUiStore((s) => s.exportIncludeBlur)
+  const blurBanned = useProjectStore((s) => s.project.noBlur ?? false)
   const seconds = useUiStore((s) => s.exportSeconds)
   const busy = useUiStore((s) => s.exportBusy)
   const progress = useUiStore((s) => s.exportProgress)
@@ -63,6 +68,9 @@ export function ExportDialog({ open, onOpenChange }: Props) {
   const setIncludeBg = (n: boolean) =>
     useUiStore.getState().patchExport({ exportIncludeBg: n })
   const setFlatten = (n: boolean) => useUiStore.getState().patchExport({ exportFlatten: n })
+  const setAdobeCompat = (n: boolean) => useUiStore.getState().patchExport({ exportAdobeCompat: n })
+  const setIncludeBlur = (n: boolean) =>
+    useUiStore.getState().patchExport({ exportIncludeBlur: n })
   const setSeconds = (n: number) => useUiStore.getState().patchExport({ exportSeconds: n })
   const setBusy = (n: boolean) => useUiStore.getState().patchExport({ exportBusy: n })
   const setProgress = (n: number) => useUiStore.getState().patchExport({ exportProgress: n })
@@ -98,6 +106,26 @@ export function ExportDialog({ open, onOpenChange }: Props) {
   )
   const outputW = Math.round(canvas.w * effScale)
   const outputH = Math.round(canvas.h * effScale)
+  // Stock check: render the Stock SVG once while the dialog is open (cheap —
+  // the Stock path skips all raster embedding) and validate every rule.
+  const stockCheck = useMemo(() => {
+    if (!open || format !== 'svg' || !results) return null
+    try {
+      const { svg, ir } = projectToSvg(project(), results, {
+        flattenAdditive: true,
+        background: includeBg ? project().canvas.bg : undefined,
+        scale: effScale,
+        adobeCompat: true,
+        includeBlur,
+      })
+      const conv = toStockIR(ir)
+      const rules = checkStockSvg(svg, outputW, outputH, 'stock-check.svg')
+      return { rules, pass: stockPasses(rules), notes: conv.notes, unfaithful: conv.unfaithful }
+    } catch {
+      return null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, format, effScale, includeBg, includeBlur, results ? results.length : 0])
 
   const run = async () => {
     if (!results) return
@@ -130,7 +158,9 @@ export function ExportDialog({ open, onOpenChange }: Props) {
         scale: effScale,
         quality,
         includeBackground: includeBg,
+        includeBlur,
         flattenAdditive: flatten,
+        adobeCompat,
       })
 
       if (res.blob) {
@@ -204,6 +234,8 @@ export function ExportDialog({ open, onOpenChange }: Props) {
     if (format === 'svg') {
       const { svg } = projectToSvg(project(), results, {
         flattenAdditive: flatten,
+        adobeCompat,
+        includeBlur,
         background: includeBg ? project().canvas.bg : undefined,
         scale: effScale,
       })
@@ -224,7 +256,9 @@ export function ExportDialog({ open, onOpenChange }: Props) {
         scale: effScale,
         quality,
         includeBackground: includeBg,
+        includeBlur,
         flattenAdditive: flatten,
+        adobeCompat,
       })
       if (res.blob) {
         const ok = await copyImage(res.blob)
@@ -304,6 +338,22 @@ export function ExportDialog({ open, onOpenChange }: Props) {
 
           {/* toggles */}
           <div className="space-y-2 rounded-lg border p-2.5">
+            {format !== 'json' && format !== 'webm' && (
+              <Row
+                id="inc-blur"
+                label="Include blur"
+                hint={
+                  blurBanned
+                    ? 'Project has blur off (Randomise pool) — exports stay sharp.'
+                    : format === 'svg' && adobeCompat
+                      ? 'On keeps the Stock vector glow expansion. Off renders sharp.'
+                      : 'On matches the canvas blur. Off renders every node sharp.'
+                }
+                checked={blurBanned ? false : includeBlur}
+                onChange={setIncludeBlur}
+                disabled={blurBanned}
+              />
+            )}
             {format !== 'json' && (
               <Row
                 id="inc-bg"
@@ -320,6 +370,15 @@ export function ExportDialog({ open, onOpenChange }: Props) {
                 hint="On pins `screen` in every renderer. Off still falls back to `screen` outside browsers, so this only costs you true additive glow."
                 checked={flatten}
                 onChange={setFlatten}
+              />
+            )}
+            {format === 'svg' && (
+              <Row
+                id="adobe"
+                label="Adobe Stock ready (ON by default)"
+                hint="Filter-free, blend-free pure vector: blurs become erfc-profile gradients/stacked strokes, blends flatten to normal, grain is dropped, artboard ≥15.5 MP, ASCII filename."
+                checked={adobeCompat}
+                onChange={setAdobeCompat}
               />
             )}
             {format === 'webm' && (
@@ -364,6 +423,43 @@ export function ExportDialog({ open, onOpenChange }: Props) {
               </div>
             )}
           </div>
+
+          {format === 'svg' && stockCheck && (
+            <div className="rounded-lg border p-2.5">
+              <div className="mb-1.5 text-xs font-medium">
+                Stock check — {stockCheck.pass ? 'pass' : 'fail'}
+              </div>
+              <ul className="space-y-1">
+                {stockCheck.rules.map((r) => (
+                  <li key={r.id} className="flex items-start gap-1.5 text-[11px] leading-snug">
+                    {r.pass ? (
+                      <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" />
+                    ) : (
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+                    )}
+                    <span>
+                      <span className="font-medium">{r.label}:</span> {r.detail}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {stockCheck.notes.length > 0 && (
+                <p className="mt-1.5 text-[11px] text-muted-foreground">{stockCheck.notes.join(' ')}</p>
+              )}
+              {stockCheck.unfaithful && (
+                <p className="mt-1.5 text-[11px]">
+                  This design cannot be converted faithfully (blends/grain flattened) — JPEG keeps the preview
+                  look.{' '}
+                  <button
+                    className="underline"
+                    onClick={() => useUiStore.getState().patchExport({ exportFormat: 'jpg' })}
+                  >
+                    Switch to JPEG
+                  </button>
+                </p>
+              )}
+            </div>
+          )}
 
           {progress > 0 && busy && <Progress value={progress} className="h-1.5" />}
 

@@ -31,6 +31,7 @@ export type SectionId =
   | 'depth'
   | 'motion'
   | 'mask'
+  | 'camera'
 
 export interface ParamDef {
   key: string
@@ -201,7 +202,7 @@ export interface GeneratorDef<P extends Params = Params> {
   id: string
   name: string
   icon: string
-  family: 'particles' | 'light' | 'atmosphere' | 'geometry' | 'texture' | 'surface' | 'wallpaper'
+  family: 'particles' | 'light' | 'atmosphere' | 'geometry' | 'texture' | 'surface' | 'wallpaper' | 'tech'
   tags: string[]
   description: string
   params: ParamDef[]
@@ -326,6 +327,12 @@ export interface Project {
    * Optional (legacy projects omit it); V1 stores the data, UI lands later.
    */
   masterFilters?: FilterInstance[]
+  /**
+   * Rolled with blur banned (Randomise pool → "Allow blur" off). `composeIR`
+   * strips every node's `blur` so preview and all exports render sharp,
+   * whatever the generators baked in. Optional: absent = previous behaviour.
+   */
+  noBlur?: boolean
 }
 
 export interface MotionSpec {

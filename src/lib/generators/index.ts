@@ -31,6 +31,8 @@ import { mosaicGen } from './tile-mosaic'
 import { meshGen } from './mesh-gradient'
 import { flowWavesGen } from './wallpaper/flow-waves'
 import { ribbonFlowGen } from './wallpaper/ribbon-flow'
+import { networkGen } from './network'
+import { surface3dGen } from './surface3d'
 
 /** Used when a project references a generator that no longer exists. */
 export const fallbackGenerator: GeneratorDef = {
@@ -63,6 +65,8 @@ export const GENERATORS: GeneratorDef[] = [
   meshGen,
   flowWavesGen,
   ribbonFlowGen,
+  networkGen,
+  surface3dGen,
 ]
 
 const byId = new Map<string, GeneratorDef>(GENERATORS.map((g) => [g.id, g]))
@@ -90,6 +94,8 @@ export const MIN_EMIT_GENS: ReadonlySet<string> = new Set([
   'emitters',
   'scatter',
   'smoke',
+  'network',
+  'surface3d',
 ])
 
 /** The lowest `count` this generator can legitimately render with. */
@@ -107,7 +113,7 @@ export function generatorIds(): string[] {
 
 /** Generator ids grouped by family (used by the layer "add" menu). */
 export function generatorsByFamily(): { family: string; gens: GeneratorDef[] }[] {
-  const order = ['wallpaper', 'surface', 'particles', 'light', 'atmosphere', 'geometry', 'texture']
+  const order = ['wallpaper', 'surface', 'particles', 'light', 'atmosphere', 'geometry', 'tech', 'texture']
   const map = new Map<string, GeneratorDef[]>()
   for (const g of GENERATORS) {
     const arr = map.get(g.family) ?? []
@@ -129,5 +135,6 @@ export const FAMILY_WEIGHTS: [string, number][] = [
   // three geometry generators now (geometric + gradients + mosaic); weight
   // raised from 2 so each one still gets drawn at a useful rate
   ['geometry', 3],
+  ['tech', 2.5],
   ['texture', 1.4],
 ]

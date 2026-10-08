@@ -8,12 +8,14 @@ export function Row({
   hint,
   checked,
   onChange,
+  disabled,
 }: {
   id: string
   label: string
   hint: string
   checked: boolean
   onChange: (v: boolean) => void
+  disabled?: boolean
 }) {
   return (
     <div className="flex items-center justify-between gap-3">
@@ -23,7 +25,7 @@ export function Row({
         </Label>
         <p className="text-[10px] leading-tight text-muted-foreground">{hint}</p>
       </div>
-      <Switch id={id} checked={checked} onCheckedChange={onChange} />
+      <Switch id={id} checked={checked} onCheckedChange={onChange} disabled={disabled} />
     </div>
   )
 }

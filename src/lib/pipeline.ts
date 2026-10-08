@@ -8,7 +8,7 @@
 
 import { createRng, hash32 } from './rng'
 import { applyModifiers } from './modifiers'
-import { buildIR, type IR, type Node, type TransformStamp } from './ir'
+import { buildIR, stripNodeBlur, type IR, type Node, type TransformStamp } from './ir'
 import { getGenerator, fallbackGenerator } from './generators'
 import { layerTransformOf, type GenContext, type Layer, type Project } from './schema'
 import { pivotOf } from './transform'
@@ -287,7 +287,12 @@ export function composeIR(project: Project, results: LayerResult[]): IR {
       })
     }
   }
-  return buildIR(project.canvas.w, project.canvas.h, nodes)
+  // Blur-banned projects (Randomise pool → "Allow blur" off) render sharp:
+  // node blur is baked by generators in ways no parameter can switch off,
+  // so it is stripped here — the one choke point preview, exports, gallery
+  // and the quality gate all share.
+  const final = project.noBlur ? stripNodeBlur(nodes) : nodes
+  return buildIR(project.canvas.w, project.canvas.h, final)
 }
 
 /** What `composeIR` stamps on a layer, or null when it needs no stamping. */

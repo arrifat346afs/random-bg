@@ -30,10 +30,12 @@ import {
   Ratio,
 } from 'lucide-react'
 import { FeedbackButtons } from './top-bar/FeedbackButtons'
+import { ActiveFiltersButton } from './top-bar/ActiveFiltersButton'
 import { useProjectStore } from '@/store/projectStore'
 import { MenuItem } from './top-bar/MenuItem'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { SeedDialog } from './top-bar/SeedDialog'
+import { RandomPoolDialog } from './RandomPoolDialog'
 import { Tip } from './top-bar/Tip'
 import { useRenderStore } from '@/store/renderStore'
 import { useUiStore } from '@/store/uiStore'
@@ -64,6 +66,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
   // the gated roll runs off-thread but still takes a moment; keep the button
   // honest about it and stop a second press queueing a second gate
   const rolling = useUiStore((s) => s.rolling)
+  const randomPoolOpen = useUiStore((s) => s.randomPoolOpen)
   const ui = () => useUiStore.getState()
 
   // Seed the draft from the committed seed on first read, then keep it in sync
@@ -280,6 +283,15 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
           <Dices className={rolling ? 'animate-spin' : undefined} />
           <span className="hidden lg:inline">{rolling ? 'Rolling…' : 'Randomise'}</span>
         </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => ui().setRandomPoolOpen(true)}
+          title="Choose which effects and backgrounds Randomise may use"
+        >
+          Pool
+        </Button>
+        <ActiveFiltersButton />
         <Button size="sm" variant="secondary" onClick={doMutate} title="Mutate current project">
           <Sparkles />
           <span className="hidden lg:inline">Mutate</span>
@@ -382,6 +394,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
       </div>
 
       <SeedDialog open={showSeed} onClose={() => ui().setShowSeed(false)} seed={seed} />
+      <RandomPoolDialog open={randomPoolOpen} onOpenChange={(v) => ui().setRandomPoolOpen(v)} />
     </header>
   )
 }

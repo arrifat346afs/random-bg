@@ -191,6 +191,26 @@ export function buildIR(w: number, h: number, nodes: Node[]): IR {
   return { w, h, nodes, stats: { count: nodes.length, blurs, additive, maxBlur } }
 }
 
+/**
+ * Drop Gaussian-blur radii from every node that has one, keeping geometry,
+ * paint and placement untouched. Used for blur-banned projects
+ * (`Project.noBlur`): generators bake `blur` in ways no parameter can
+ * centrally switch off (depth-of-field, hard-coded feather/glow), so the
+ * single complete kill-switch is here, at compose time — preview, raster
+ * exports, SVG and the quality gate all read the composed IR.
+ */
+export function stripNodeBlur(nodes: Node[]): Node[] {
+  let dirty = false
+  for (const n of nodes) {
+    if (n.blur && n.blur > 0) {
+      dirty = true
+      break
+    }
+  }
+  if (!dirty) return nodes
+  return nodes.map((n) => (n.blur && n.blur > 0 ? { ...n, blur: undefined } : n))
+}
+
 /* ---- Paint helpers ----------------------------------------------------- */
 
 export const solid = (c: Color): Paint => ({ k: 'solid', c })

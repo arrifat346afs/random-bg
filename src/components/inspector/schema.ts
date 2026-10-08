@@ -13,6 +13,7 @@ export const SECTION_LABELS: Record<string, string> = {
   style: 'Style',
   depth: 'Depth & focus',
   motion: 'Motion',
+  camera: 'Camera',
 }
 
 /* ---- distribution field schema ------------------------------------------ */

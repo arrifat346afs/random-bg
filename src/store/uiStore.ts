@@ -30,6 +30,7 @@ import type { Harmony } from '../lib/palette'
 import { useProjectStore } from './projectStore'
 import type { Project } from '../lib/schema'
 import type { LayerTransform } from '../lib/transform'
+import { loadRandomPool, saveRandomPool, type RandomPoolPrefs } from '../lib/random-pool'
 
 export interface ViewState {
   zoom: number
@@ -49,6 +50,11 @@ export interface ViewState {
    * by a few units, which is a surprise if you did not ask for it.
    */
   snapToCanvas: boolean
+  /**
+   * SVG export fidelity. Persisted with the same view key so the choice is
+   * remembered per user, never silently flipped per project.
+   */
+  svgExportMode: 'vector' | 'hybrid' | 'image'
 }
 
 /**
@@ -67,6 +73,7 @@ export function initialView(saved?: Partial<ViewState> | null): ViewState {
     theme: initialTheme(),
     lockAspect: true,
     snapToCanvas: false,
+    svgExportMode: 'vector',
   }
   return saved ? { ...base, ...saved, theme: base.theme } : base
 }
@@ -195,6 +202,9 @@ export interface UiStore {
   showSeed: boolean
   /** a randomise is in flight — stops a second press queueing a second gate */
   rolling: boolean
+  /** controllable Randomise pool (generators, backgrounds, filters, blends) */
+  randomPool: RandomPoolPrefs
+  randomPoolOpen: boolean
 
   /* export dialog */
   exportFormat: ExportFormat
@@ -202,6 +212,10 @@ export interface UiStore {
   exportQuality: number
   exportIncludeBg: boolean
   exportFlatten: boolean
+  exportAdobeCompat: boolean
+  /** SVG/raster export toggle: false renders every node sharp. Defaults to true. */
+  exportIncludeBlur: boolean
+  exportSvgMode: 'vector' | 'hybrid' | 'image'
   exportSeconds: number
   exportBusy: boolean
   exportProgress: number
@@ -315,6 +329,9 @@ export interface UiStore {
   setSeedDraft: (seed: string) => void
   setShowSeed: (show: boolean) => void
   setRolling: (rolling: boolean) => void
+  patchRandomPool: (patch: Partial<RandomPoolPrefs>) => void
+  setRandomPoolOpen: (open: boolean) => void
+  toggleRandomGen: (genId: string) => void
   patchExport: (patch: Partial<Pick<UiStore, ExportKeys>>) => void
   /** Clear the transient export fields; called when the format or open state changes. */
   resetExportTransient: (epoch: string) => void
@@ -360,6 +377,8 @@ type ExportKeys =
   | 'exportQuality'
   | 'exportIncludeBg'
   | 'exportFlatten'
+  | 'exportAdobeCompat'
+  | 'exportIncludeBlur'
   | 'exportSeconds'
   | 'exportBusy'
   | 'exportProgress'
@@ -381,12 +400,17 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   seedDraft: '',
   showSeed: false,
   rolling: false,
+  randomPool: loadRandomPool(),
+  randomPoolOpen: false,
 
   exportFormat: 'png',
   exportScale: 2,
   exportQuality: 0.92,
   exportIncludeBg: false,
   exportFlatten: false,
+  exportAdobeCompat: true,
+  exportIncludeBlur: true,
+  exportSvgMode: 'vector',
   exportSeconds: 4,
   exportBusy: false,
   exportProgress: 0,
@@ -481,6 +505,21 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setSeedDraft: (seedDraft) => set({ seedDraft }),
   setShowSeed: (showSeed) => set({ showSeed }),
   setRolling: (rolling) => set({ rolling }),
+
+  patchRandomPool: (patch) =>
+    set((s) => {
+      const randomPool = { ...s.randomPool, ...patch }
+      saveRandomPool(randomPool)
+      return { randomPool }
+    }),
+  setRandomPoolOpen: (randomPoolOpen) => set({ randomPoolOpen }),
+  toggleRandomGen: (genId) =>
+    set((s) => {
+      const on = s.randomPool.gens[genId] ?? true
+      const randomPool = { ...s.randomPool, gens: { ...s.randomPool.gens, [genId]: !on } }
+      saveRandomPool(randomPool)
+      return { randomPool }
+    }),
 
   patchExport: (patch) => set(patch),
   /**
@@ -666,5 +705,6 @@ function saveView(view: ViewState, immediate: boolean): void {
     panY: view.panY,
     checker: view.checker,
     lockAspect: view.lockAspect,
+    svgExportMode: view.svgExportMode,
   })
 }

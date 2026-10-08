@@ -10,6 +10,7 @@
  */
 
 import { hexToRgb, rgbToHex } from '../palette'
+import type { GradientStop } from '../ir'
 
 /** OKLab triple: L 0..1, a/b roughly −0.4..0.4. */
 export interface OkLab {
@@ -172,6 +173,35 @@ export function capYellow(hex: string, maxC = 0.12): string {
   const dH = Math.min(Math.abs(c.H - 100), 360 - Math.abs(c.H - 100))
   if (dH > 12 || c.C <= maxC) return hex
   return intoGamut({ ...c, C: maxC })
+}
+
+/** Sample an existing stop list in OKLCH space at n (≥ stops.length) points. */
+export function resampleStops(
+  stops: GradientStop[],
+  n: number,
+): GradientStop[] {
+  if (stops.length < 2 || n <= stops.length) return stops
+  const out: GradientStop[] = []
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1)
+    // find surrounding stops
+    let j = 0
+    while (j < stops.length - 2 && stops[j + 1].t < t) j++
+    const a = stops[j]
+    const b = stops[j + 1]
+    const f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0
+    const A = oklchFromHex(a.c)
+    const B = oklchFromHex(b.c)
+    let dh = B.H - A.H
+    if (dh > 180) dh -= 360
+    if (dh < -180) dh += 360
+    out.push({
+      t: Number(t.toFixed(4)),
+      c: intoGamut({ L: A.L + (B.L - A.L) * f, C: A.C + (B.C - A.C) * f, H: (A.H + dh * f + 360) % 360 }),
+      o: (a.o ?? 1) + ((b.o ?? 1) - (a.o ?? 1)) * f,
+    })
+  }
+  return out
 }
 
 /**

@@ -31,6 +31,8 @@ import {
   type Pivot,
 } from '../transform'
 import { compileLayerFilter } from '../filters/svg'
+import { resampleStops } from '../field/oklab'
+import { toStockIR } from './stock'
 
 export interface SvgRenderOpts {
   background?: BackgroundSpec
@@ -60,11 +62,54 @@ export interface SvgRenderOpts {
    * and embedded here as an `<image>`. Everything else in the file stays
    * vector. `renderSVG` itself stays pure — it never touches a canvas.
    */
-  rasterImages?: Record<string, string>
+   rasterImages?: Record<string, string>
+  /**
+   * Vector fidelity:
+   *  - 'vector' (default): everything is vector; ramp fills carry dense
+   *    OKLCH-sampled gradient stops; dithered layers get NO <image>.
+   *  - 'hybrid': vector shapes + a single embedded dithered raster placed
+   *    UNDER the vector overlays for the smooth colour field.
+   *  - 'image': every smooth-field layer collapses to its embedded raster.
+   * Raster-only filters collapse their layer to <image> in every mode.
+   */
+  svgMode?: 'vector' | 'hybrid' | 'image'
+  /**
+   * Ids of layers whose colour field is dithered by canvas raster (computed
+   * by the caller, which owns the generator registry). Raster-only filter
+   * layers are treated as raster regardless of mode.
+   */
+  ditheredLayerIds?: ReadonlySet<string>
+  /** layer id → readable layer name, for `<g id="…">` groups */
+  layerNames?: Record<string, string>
+  /** ids of layers that count as raster-only (filters force raster) */
+  rasterFilteredIds?: ReadonlySet<string>
+  /**
+   * Adobe Stock compatibility mode:
+   *  - drops the deprecated `xmlns:xlink` namespace
+   *  - replaces `plus-lighter` with `screen` everywhere (no `<style>` block)
+   *  - skips embedded raster images in vector mode (pure vector only)
+   */
+  adobeCompat?: boolean
+  /**
+   * Emit node blur (`<feGaussianBlur>`, or the Stock vector expansion when
+   * `adobeCompat` is on). `false` renders every node sharp, preview untouched.
+   * Defaults to true.
+   */
+  includeBlur?: boolean
 }
 
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+/** Slug a layer name into a valid SVG id (safe for Inkscape's layers panel). */
+function nameId(name: string, fallback: string): string {
+  const s = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+  return s ? `layer-${s}` : `layer-${fallback}`
+}
 
 function fmt(v: number, d: number): string {
   if (!Number.isFinite(v)) return '0'
@@ -171,10 +216,12 @@ export function nodesToSvg(
   d: number,
   defs: Map<string, string>,
   filters: Map<string, string>,
-  opts: { flattenAdditive?: boolean } = {},
+  opts: { flattenAdditive?: boolean; adobeCompat?: boolean; includeBlur?: boolean } = {},
 ): { body: string[]; hasAdditive: boolean } {
   const body: string[] = []
   let hasAdditive = false
+  const adobeCompat = opts.adobeCompat ?? false
+  const includeBlur = opts.includeBlur ?? true
   for (const node of nodes) {
     const geo = geoSvg(node, d)
     if (!geo) continue
@@ -212,33 +259,37 @@ export function nodesToSvg(
 
     // Blend and filter go out as *presentation attributes*, which every
     // renderer understands, rather than CSS in a style="" attribute.
+    // In adobeCompat (Stock) mode no blend or blur is emitted at all: the
+    // caller runs toStockIR first, so every node here is already normal/unblurred.
     const flatten = opts.flattenAdditive ?? false
-    const blend = blendCss(node.blend ?? 'normal', flatten)
-    if (blend) {
-      if (!flatten && blend === 'plus-lighter') {
-        // `plus-lighter` is browser-only: Inkscape/resvg/librsvg don't know the
-        // value and render the node unblended, which flattens every additive
-        // glow. So the attribute carries the universally-supported `screen`
-        // fallback and a <style> rule upgrades browsers to true additive —
-        // CSS outranks presentation attributes in the cascade, and renderers
-        // that ignore the stylesheet keep `screen`.
-        attrs.push('mix-blend-mode="screen"', 'class="additive"')
-        hasAdditive = true
-      } else {
-        attrs.push(`mix-blend-mode="${blend}"`)
+    if (!adobeCompat) {
+      const blend = blendCss(node.blend ?? 'normal', flatten)
+      if (blend) {
+        if (!flatten && blend === 'plus-lighter') {
+          // `plus-lighter` is browser-only: Inkscape/resvg/librsvg don't know the
+          // value and render the node unblended, which flattens every additive
+          // glow. So the attribute carries the universally-supported `screen`
+          // fallback and a <style> rule upgrades browsers to true additive —
+          // CSS outranks presentation attributes in the cascade, and renderers
+          // that ignore the stylesheet keep `screen`.
+          attrs.push('mix-blend-mode="screen"', 'class="additive"')
+          hasAdditive = true
+        } else {
+          attrs.push(`mix-blend-mode="${blend}"`)
+        }
       }
-    }
-    if (node.blur && node.blur > 0.05) {
-      const key = `b${Math.round(node.blur * 100)}`
-      if (!filters.has(key)) {
-        filters.set(
-          key,
-          `<filter id="${key}" x="-60%" y="-60%" width="220%" height="220%" ` +
-            `color-interpolation-filters="sRGB" filterUnits="objectBoundingBox">` +
-            `<feGaussianBlur stdDeviation="${fmt(node.blur, 2)}"/></filter>`,
-        )
+      if (includeBlur && node.blur && node.blur > 0.05) {
+        const key = `b${Math.round(node.blur * 100)}`
+        if (!filters.has(key)) {
+          filters.set(
+            key,
+            `<filter id="${key}" x="-60%" y="-60%" width="220%" height="220%" ` +
+              `color-interpolation-filters="sRGB" filterUnits="objectBoundingBox">` +
+              `<feGaussianBlur stdDeviation="${fmt(node.blur, 2)}"/></filter>`,
+          )
+        }
+        attrs.push(`filter="url(#${key})"`)
       }
-      attrs.push(`filter="url(#${key})"`)
     }
 
     body.push(`${geo} ${attrs.join(' ')}/>`)
@@ -270,8 +321,20 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
   const d = opts.decimals ?? 2
   const defs = new Map<string, string>()
   const filters = new Map<string, string>()
+  const adobeCompat = opts.adobeCompat ?? false
+  const includeBlur = opts.includeBlur ?? true
   /** any node relying on the <style> plus-lighter upgrade? */
   let hasAdditive = false
+  // Blur toggle: sharp export without touching the preview. Stripped before
+  // the Stock conversion so `false` also skips the vector blur expansion.
+  const sharpIR =
+    includeBlur || ir.stats.blurs === 0
+      ? ir
+      : { ...ir, nodes: ir.nodes.map((n) => (n.blur ? { ...n, blur: undefined } : n)) }
+  // Stock path: expand blurs to gradients/stacked strokes and flatten blends
+  // up front, so everything below serialises filter-free and blend-free.
+  // viewBox is untouched — only node paints change.
+  const srcIR = adobeCompat ? { ...sharpIR, nodes: toStockIR(sharpIR).nodes } : sharpIR
 
   const body: string[] = []
 
@@ -290,17 +353,20 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
       body.push(`<rect width="100%" height="100%" fill="url(#${id})"/>`)
     } else if (bg.kind === 'noise') {
       body.push(`<rect width="100%" height="100%" fill="${bg.color}"/>`)
-      // Noise backgrounds are raster-only by nature; approximated with a
-      // documented <feTurbulence> overlay.
-      defs.set(
-        'bgturb',
-        `<filter id="bgturb" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">` +
-          `<feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="3" seed="7"/>` +
-          `<feColorMatrix type="saturate" values="0"/></filter>`,
-      )
-      body.push(
-        `<rect width="100%" height="100%" filter="url(#bgturb)" opacity="${Math.min(0.5, bg.amount)}"/>`,
-      )
+      if (!adobeCompat) {
+        // Noise backgrounds are raster-only by nature; approximated with a
+        // documented <feTurbulence> overlay. Stock mode drops the grain
+        // entirely (pure-vector rule) and keeps the solid ground.
+        defs.set(
+          'bgturb',
+          `<filter id="bgturb" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">` +
+            `<feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="3" seed="7"/>` +
+            `<feColorMatrix type="saturate" values="0"/></filter>`,
+        )
+        body.push(
+          `<rect width="100%" height="100%" filter="url(#bgturb)" opacity="${Math.min(0.5, bg.amount)}"/>`,
+        )
+      }
     }
   }
 
@@ -308,52 +374,98 @@ export function renderSVG(ir: IR, opts: SvgRenderOpts = {}): string {
   // filtered layer and leaves it off everything else, so a contiguous run with
   // the same `lid` is exactly one layer's geometry. Each such run becomes a
   // single `<g filter>` over one chained `<filter>` — Illustrator semantics.
-  for (const run of groupByLayer(ir.nodes)) {
-    // A layer whose stack needs rasterising arrives pre-rendered from
-    // `projectToSvg`; emit it as an <image> rather than silently dropping the
-    // filter on the floor.
-    const dataUrl = run.lid ? opts.rasterImages?.[run.lid] : undefined
-    if (run.lid && dataUrl) {
+  // Nodes arrive grouped by layer: `composeIR` stamps `lid` on grouped layers
+  // and leaves it off everything else, so a contiguous run with the same `lid`
+  // is exactly one layer's geometry. Dithered layers keep vector fills here;
+  // the canvas backend costed the dither onto the raster, SVG embeds the
+  // matching raster as <image> underneath (hybrid) or replaces (image mode).
+  const mode = opts.svgMode ?? 'vector'
+  for (const run of groupByLayer(srcIR.nodes)) {
+    if (!run.lid) {
+      body.push(...nodesToSvg(run.nodes, d, defs, filters, { flattenAdditive: opts.flattenAdditive ?? false, adobeCompat, includeBlur }).body)
+      continue
+    }
+    const needsRasterFilter = opts.rasterFilteredIds?.has(run.lid) === true
+    const isDithered = opts.ditheredLayerIds?.has(run.lid) === true
+    const rasterUrl = opts.rasterImages?.[run.lid]
+    // In adobeCompat mode, skip raster embedding in vector/hybrid mode for pure vector output
+    const skipRaster = adobeCompat && mode !== 'image'
+    // whole-layer raster: raster-only filters always; dithered layers only
+    // when the mode asks for the raster form ('image')
+    if (rasterUrl && !skipRaster && (needsRasterFilter || (isDithered && mode === 'image'))) {
       const placement = run.nodes[0] ? nodePlacementAttr(run.nodes[0]) : ''
       const transform = placement ? ` transform="${placement}"` : ''
+      const name = opts.layerNames?.[run.lid]
       body.push(
-        `<g${transform}><image href="${esc(dataUrl)}" x="0" y="0" ` +
-          `width="${fmt(ir.w, 2)}" height="${fmt(ir.h, 2)}" ` +
+        `<g${name ? ` id="${esc(nameId(name, run.lid))}"` : ''}${transform}><image href="${esc(rasterUrl)}" x="0" y="0" ` +
+          `width="${fmt(srcIR.w, 2)}" height="${fmt(srcIR.h, 2)}" ` +
           `preserveAspectRatio="none"/></g>`,
       )
       continue
     }
-    const { body: runBody, hasAdditive: runAdditive } = nodesToSvg(run.nodes, d, defs, filters, {
+    // hybrid: the dithered colour field sits under the vector shapes
+    if (!skipRaster && mode === 'hybrid' && isDithered && rasterUrl) {
+      const placement = run.nodes[0] ? nodePlacementAttr(run.nodes[0]) : ''
+      const name = opts.layerNames?.[run.lid]
+      body.push(
+        `<g${name ? ` id="${esc(nameId(name, run.lid))}"` : ''}>` +
+          `<image href="${esc(rasterUrl)}" x="0" y="0" ` +
+          `width="${fmt(srcIR.w, 2)}" height="${fmt(srcIR.h, 2)}" ` +
+          `preserveAspectRatio="none" transform="${placement}"/></g>`,
+      )
+    }
+    // In pure-vector mode the smooth-field gradients carry the whole colour
+    // ramp, so they get a dense OKLCH stop list (sRGB interpolators in some
+    // viewers otherwise muddy the midtones). Other gradients are untouched.
+    let runNodes = run.nodes
+    if (mode === 'vector' && isDithered) {
+      runNodes = run.nodes.map((n) => {
+        const f = n.fill
+        if (f && (f.k === 'linear' || f.k === 'radial') && f.stops.length < 32) {
+          return { ...n, fill: { ...f, stops: resampleStops(f.stops, 32) } }
+        }
+        return n
+      })
+    }
+    const { body: runBody, hasAdditive: runAdditive2 } = nodesToSvg(runNodes, d, defs, filters, {
       flattenAdditive: opts.flattenAdditive ?? false,
+      adobeCompat,
+      includeBlur,
     })
-    hasAdditive ||= runAdditive
-    if (!run.lid) {
-      body.push(...runBody)
-      continue
+    hasAdditive ||= runAdditive2
+    const compiled = adobeCompat
+      ? null
+      : compileLayerFilter(run.lid, opts.layerFilters?.[run.lid] ?? [], srcIR.w, srcIR.h, run.nodes)
+    const inner = runBody.join('')
+    const name = opts.layerNames?.[run.lid]
+    if (compiled) {
+      if (!filters.has(compiled.id)) filters.set(compiled.id, compiled.element)
+      body.push(`<g${name ? ` id="${esc(nameId(name, run.lid))}"` : ''} filter="url(#${compiled.id})">${inner}</g>`)
+    } else {
+      body.push(name ? `<g id="${esc(nameId(name, run.lid))}">${inner}</g>` : inner)
     }
-    const compiled = compileLayerFilter(run.lid, opts.layerFilters?.[run.lid] ?? [], ir.w, ir.h, run.nodes)
-    if (!compiled) {
-      body.push(...runBody)
-      continue
-    }
-    if (!filters.has(compiled.id)) filters.set(compiled.id, compiled.element)
-    body.push(`<g filter="url(#${compiled.id})">${runBody.join('')}</g>`)
   }
 
   const allDefs = [...defs.values(), ...filters.values()].join('')
-  const outW = Math.max(1, Math.round(ir.w * (opts.scale ?? 1)))
-  const outH = Math.max(1, Math.round(ir.h * (opts.scale ?? 1)))
+  const outW = Math.max(1, Math.round(srcIR.w * (opts.scale ?? 1)))
+  const outH = Math.max(1, Math.round(srcIR.h * (opts.scale ?? 1)))
   const wAttr = opts.viewboxOnly ? '' : ` width="${outW}" height="${outH}"`
   const defsBlock = allDefs ? `<defs>${allDefs}</defs>` : ''
   // Only emitted when something needs it, so additive-free exports are unchanged.
-  const styleBlock = hasAdditive ? `<style>.additive{mix-blend-mode:plus-lighter}</style>` : ''
+  // Stock mode never emits it (no plus-lighter, no class=).
+  const styleBlock = hasAdditive && !adobeCompat ? `<style>.additive{mix-blend-mode:plus-lighter}</style>` : ''
+
+  const nsXlink = adobeCompat ? '' : ' xmlns:xlink="http://www.w3.org/1999/xlink"'
+  // Stock mode: bare <g> — no isolation (fails the no-blend Stock check) and
+  // no style/class anywhere in the file.
+  const openGroup = adobeCompat ? `<g>` : `<g style="isolation:isolate">`
 
   return (
     `<svg xmlns="http://www.w3.org/2000/svg"${wAttr} ` +
-    `viewBox="0 0 ${fmt(ir.w, 0)} ${fmt(ir.h, 0)}" ` +
-    `xmlns:xlink="http://www.w3.org/1999/xlink" ` +
+    `viewBox="0 0 ${fmt(srcIR.w, 0)} ${fmt(srcIR.h, 0)}"` +
+    `${nsXlink} ` +
     `shape-rendering="geometricPrecision">` +
-    `<g style="isolation:isolate">` +
+    openGroup +
     styleBlock +
     defsBlock +
     body.join('') +
