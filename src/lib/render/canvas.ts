@@ -14,6 +14,7 @@
 
 import { hexToRgb, type Palette } from '../palette'
 import { createRng, hash32 } from '../rng'
+import { createCanvas, get2d, type AnyCanvas } from '../canvas-factory'
 import type { BlendMode, IR, Node, Paint, TransformStamp } from '../ir'
 import type { BackgroundSpec, FilterInstance } from '../schema'
 import { applyFilterStack } from '../filters/canvas'
@@ -145,16 +146,14 @@ function roundRect(
 
 /* ---- Background --------------------------------------------------------- */
 
-const noiseTiles = new Map<string, HTMLCanvasElement>()
+const noiseTiles = new Map<string, AnyCanvas>()
 
-function noiseTile(color: string, amount: number): HTMLCanvasElement {
+function noiseTile(color: string, amount: number): AnyCanvas {
   const key = `${color}|${amount}`
-  let c = noiseTiles.get(key)
-  if (c) return c
-  c = document.createElement('canvas')
-  c.width = 128
-  c.height = 128
-  const g = c.getContext('2d')
+  const hit = noiseTiles.get(key)
+  if (hit) return hit
+  const c = createCanvas(128, 128)
+  const g = get2d(c)
   if (g) {
     const img = g.createImageData(128, 128)
     const [r, gg, b] = hexToRgb(color)
@@ -672,7 +671,10 @@ function drawFilteredRun(
     // The nested draw must not re-arm the global pixel budget, or a layer with
     // a filter stack would get a fresh one and blow the ceiling.
     const budget = filterPxLeft
-    drawNodes(sx, unplaced, { ...o, skipBlur: false, layerFilters: undefined, ditherLayers: undefined })
+    // Scratch contexts may be offscreen in the export worker; the draw path
+    // only uses the shared 2D subset, so the cast is layout-compatible.
+    const main = sx as CanvasRenderingContext2D
+    drawNodes(main, unplaced, { ...o, skipBlur: false, layerFilters: undefined, ditherLayers: undefined })
     filterPxLeft = budget
 
     const filtered = applyOffscreen(s, w, h, filters, nodes[i].lid ?? '', o, ditherSeed)
@@ -701,7 +703,7 @@ function applyOffscreen(
   lid: string,
   o: DrawOpts,
   ditherSeed: number | null,
-): HTMLCanvasElement {
+): AnyCanvas {
   const sx = s.x
   if (!sx) return s.c
   const img = sx.getImageData(0, 0, w, h)
@@ -916,7 +918,8 @@ function drawBatch(ctx: CanvasRenderingContext2D, group: Blurred[], o: DrawOpts)
     // identical user→device mapping as the target, shifted by the surface origin
     sx.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0)
     const inner: DrawOpts = { ...o, skipBlur: true }
-    for (const e of group) drawNode(sx, e.n, inner)
+    // See drawFilteredRun: scratch contexts may be offscreen in the worker.
+    for (const e of group) drawNode(sx as CanvasRenderingContext2D, e.n, inner)
 
     ctx.save()
     ctx.setTransform(1, 0, 0, 1, 0, 0)
@@ -1064,7 +1067,7 @@ function drawBlurredWide(
     sx.setTransform(t.a * k, t.b * k, t.c * k, t.d * k, (t.e - x0) * k, (t.f - y0) * k)
     sx.filter = `blur(${(sigma * k).toFixed(3)}px)`
     sx.globalAlpha = node.op ?? 1
-    paintShape(sx, node)
+    paintShape(sx as CanvasRenderingContext2D, node)
     sx.filter = 'none'
     sx.globalAlpha = 1
 
@@ -1092,11 +1095,11 @@ function approximateBlur(ctx: CanvasRenderingContext2D, node: Node): void {
 }
 
 /** Convenience: render an IR into a fresh canvas. */
-export function irToCanvas(
-  ir: IR,
-  opts: CanvasRenderOpts = {},
-): HTMLCanvasElement {
-  const c = document.createElement('canvas')
+export function irToCanvas(ir: IR, opts: CanvasRenderOpts = {}): AnyCanvas {
+  const c = createCanvas(
+    Math.max(1, Math.round(ir.w * (opts.scale ?? 1))),
+    Math.max(1, Math.round(ir.h * (opts.scale ?? 1))),
+  )
   renderCanvas(ir, c, opts)
   return c
 }

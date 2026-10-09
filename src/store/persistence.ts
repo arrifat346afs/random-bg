@@ -13,6 +13,8 @@ export const KEYS = {
   presets: 'fx-forge:presets:v1',
   theme: 'fx-forge:theme',
   view: 'fx-forge:view',
+  /** remembered export-settings prefs (never the transient job state) */
+  export: 'fx-forge:export-prefs:v1',
 } as const
 
 export function loadJSON<T>(key: string): T | null {

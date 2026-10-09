@@ -17,10 +17,12 @@
  * Pure DOM only — no store, no React.
  */
 
+import { createCanvas, get2d, type AnyCanvas } from '../canvas-factory'
+
 /** A borrowed offscreen surface plus its 2D context. */
 export interface Surface {
-  c: HTMLCanvasElement
-  x: CanvasRenderingContext2D | null
+  c: AnyCanvas
+  x: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null
 }
 
 /**
@@ -43,12 +45,12 @@ let depth = 0
  */
 export function acquireScratch(w: number, h: number): Surface | null {
   if (!(w > 0) || !(h > 0)) return null
-  if (typeof document === 'undefined') return null
+  if (typeof document === 'undefined' && typeof OffscreenCanvas === 'undefined') return null
   depth++
   const slot = depth - 1
   let s = pool[slot]
   if (!s) {
-    s = { c: document.createElement('canvas'), x: null }
+    s = { c: createCanvas(w, h), x: null }
     pool[slot] = s
   }
   if (s.c.width !== w || s.c.height !== h) {
@@ -61,7 +63,7 @@ export function acquireScratch(w: number, h: number): Surface | null {
     // Read back on every filtered run (`applyOffscreen` calls `getImageData`),
     // so ask for a read-optimised context up front rather than logging a
     // `willReadFrequently` warning per run.
-    s.x = s.c.getContext('2d', { willReadFrequently: true })
+    s.x = get2d(s.c, { willReadFrequently: true })
   }
   return s.x ? s : null
 }

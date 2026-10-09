@@ -24,13 +24,14 @@
  */
 
 import { create } from 'zustand'
-import { KEYS, saveJSON, saveThemeKey } from './persistence'
+import { KEYS, loadJSON, saveJSON, saveThemeKey } from './persistence'
 import { variations } from '../lib/randomize'
 import type { Harmony } from '../lib/palette'
 import { useProjectStore } from './projectStore'
 import type { Project } from '../lib/schema'
 import type { LayerTransform } from '../lib/transform'
 import { loadRandomPool, saveRandomPool, type RandomPoolPrefs } from '../lib/random-pool'
+import type { ExportFolderState } from '../lib/export-folder'
 
 export interface ViewState {
   zoom: number
@@ -224,6 +225,10 @@ export interface UiStore {
   /** format+open signature the transient fields above were last reset against */
   exportEpoch: string
   exportCopied: boolean
+  /** save-to-folder state: the remembered root's display name, if any */
+  exportFolderName: string | null
+  /** save-to-folder state: refreshed when the settings dialog opens */
+  exportFolderState: ExportFolderState
 
   /* gallery dialog */
   gallery: Project[] | null
@@ -333,6 +338,8 @@ export interface UiStore {
   setRandomPoolOpen: (open: boolean) => void
   toggleRandomGen: (genId: string) => void
   patchExport: (patch: Partial<Pick<UiStore, ExportKeys>>) => void
+  /** Point the save-location UI at a root folder state (never persisted). */
+  setExportFolder: (name: string | null, state: ExportFolderState) => void
   /** Clear the transient export fields; called when the format or open state changes. */
   resetExportTransient: (epoch: string) => void
   setGallery: (gallery: Project[] | null) => void
@@ -386,6 +393,62 @@ type ExportKeys =
   | 'exportFallback'
   | 'exportCopied'
 
+/** The settings half of `ExportKeys` — what gets remembered across sessions. */
+const EXPORT_PREF_KEYS = [
+  'exportFormat',
+  'exportScale',
+  'exportQuality',
+  'exportIncludeBg',
+  'exportFlatten',
+  'exportAdobeCompat',
+  'exportIncludeBlur',
+  'exportSeconds',
+] as const
+
+type ExportPrefKey = (typeof EXPORT_PREF_KEYS)[number]
+
+const EXPORT_FORMATS: UiStore['exportFormat'][] = ['png', 'jpg', 'webp', 'svg', 'json', 'webm']
+
+/**
+ * Previously remembered export settings, validated field by field so one
+ * corrupt value cannot take down the rest (or the defaults).
+ */
+export function loadExportPrefs(): Partial<Pick<UiStore, ExportPrefKey>> {
+  const raw = loadJSON<Record<string, unknown>>(KEYS.export)
+  if (!raw) return {}
+  const out: Partial<Pick<UiStore, ExportPrefKey>> = {}
+  if (typeof raw.exportFormat === 'string' && (EXPORT_FORMATS as string[]).includes(raw.exportFormat)) {
+    out.exportFormat = raw.exportFormat as UiStore['exportFormat']
+  }
+  if (typeof raw.exportScale === 'number' && Number.isFinite(raw.exportScale)) {
+    out.exportScale = Math.max(0.25, Math.min(8, raw.exportScale))
+  }
+  if (typeof raw.exportQuality === 'number' && Number.isFinite(raw.exportQuality)) {
+    out.exportQuality = Math.max(0.3, Math.min(1, raw.exportQuality))
+  }
+  for (const k of ['exportIncludeBg', 'exportFlatten', 'exportAdobeCompat', 'exportIncludeBlur'] as const) {
+    if (typeof raw[k] === 'boolean') out[k] = raw[k] as boolean
+  }
+  if (typeof raw.exportSeconds === 'number' && Number.isFinite(raw.exportSeconds)) {
+    out.exportSeconds = Math.max(1, Math.min(12, Math.round(raw.exportSeconds)))
+  }
+  return out
+}
+
+/** Synchronous: `patchExport` fires on clicks, not per tick, so no debounce needed. */
+function saveExportPrefs(s: UiStore): void {
+  saveJSON(KEYS.export, {
+    exportFormat: s.exportFormat,
+    exportScale: s.exportScale,
+    exportQuality: s.exportQuality,
+    exportIncludeBg: s.exportIncludeBg,
+    exportFlatten: s.exportFlatten,
+    exportAdobeCompat: s.exportAdobeCompat,
+    exportIncludeBlur: s.exportIncludeBlur,
+    exportSeconds: s.exportSeconds,
+  })
+}
+
 export const useUiStore = create<UiStore>()((set, get) => ({
   view: initialView(loadView()),
   inspectorTab: 'params',
@@ -418,6 +481,10 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   exportFallback: null,
   exportEpoch: '',
   exportCopied: false,
+  exportFolderName: null,
+  exportFolderState: 'unknown',
+  /* remembered export prefs overlay the defaults; see loadExportPrefs */
+  ...loadExportPrefs(),
 
   gallery: null,
   galleryRound: 0,
@@ -521,7 +588,14 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       return { randomPool }
     }),
 
-  patchExport: (patch) => set(patch),
+  patchExport: (patch) => {
+    set(patch)
+    // Remember the settings half; transient job fields (busy/progress/status)
+    // are deliberately never written.
+    if (EXPORT_PREF_KEYS.some((k) => k in patch)) saveExportPrefs(get())
+  },
+  setExportFolder: (exportFolderName, exportFolderState) =>
+    set({ exportFolderName, exportFolderState }),
   /**
    * Called during the dialog's render to clear a stale result when it re-opens
    * or the format changes. Guarded on the epoch so a repeat call is a no-op —

@@ -3,12 +3,10 @@ import {
   MAX_EXPORT_PIXELS,
   copyImage,
   copyText,
-  downloadBlob,
-  exportAnimation,
-  exportProject,
   projectToSvg,
   type ExportFormat,
 } from '@/lib/export'
+import { renderExportBlob } from '@/lib/export-run'
 import {
   Dialog,
   DialogContent,
@@ -21,19 +19,23 @@ import { Badge } from '@/components/ui/badge'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
-import { Progress } from '@/components/ui/progress'
-import { Download, Copy, Check, AlertTriangle } from 'lucide-react'
-import { useMemo } from 'react'
+import { Copy, Check, AlertTriangle, FolderOpen } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { useProjectStore } from '@/store/projectStore'
 import { useRenderStore } from '@/store/renderStore'
 import { useUiStore } from '@/store/uiStore'
+import {
+  disconnectExportRoot,
+  folderNameFor,
+  pickExportRoot,
+  reconnectExportRoot,
+  refreshExportFolder,
+} from '@/lib/export-folder'
 import { rasterFilteredLayers } from '@/lib/filters/attach'
 import { checkStockSvg, stockPasses } from '@/lib/render/stock-check'
 import { toStockIR } from '@/lib/render/stock'
-import { FallbackBox } from './export/FallbackBox'
 import { FormatPicker } from './export/FormatPicker'
 import { Row } from './export/Row'
-import { fmtBytes } from './export/format'
 
 interface Props {
   open: boolean
@@ -58,10 +60,12 @@ export function ExportDialog({ open, onOpenChange }: Props) {
   const blurBanned = useProjectStore((s) => s.project.noBlur ?? false)
   const seconds = useUiStore((s) => s.exportSeconds)
   const busy = useUiStore((s) => s.exportBusy)
-  const progress = useUiStore((s) => s.exportProgress)
   const status = useUiStore((s) => s.exportStatus)
-  const fallback = useUiStore((s) => s.exportFallback)
   const epoch = useUiStore((s) => s.exportEpoch)
+  const projectName = useProjectStore((s) => s.project.name)
+  const folderName = useUiStore((s) => s.exportFolderName)
+  const folderState = useUiStore((s) => s.exportFolderState)
+  const [folderBusy, setFolderBusy] = useState(false)
   const setFormat = (f: ExportFormat) => useUiStore.getState().patchExport({ exportFormat: f })
   const setScale = (n: number) => useUiStore.getState().patchExport({ exportScale: n })
   const setQuality = (n: number) => useUiStore.getState().patchExport({ exportQuality: n })
@@ -73,16 +77,43 @@ export function ExportDialog({ open, onOpenChange }: Props) {
     useUiStore.getState().patchExport({ exportIncludeBlur: n })
   const setSeconds = (n: number) => useUiStore.getState().patchExport({ exportSeconds: n })
   const setBusy = (n: boolean) => useUiStore.getState().patchExport({ exportBusy: n })
-  const setProgress = (n: number) => useUiStore.getState().patchExport({ exportProgress: n })
   const setStatus = (v: { kind: 'ok' | 'warn'; msg: string } | null) =>
     useUiStore.getState().patchExport({ exportStatus: v })
-  const setFallback = (v: {
-    title: string
-    body: string
-    url?: string
-    copyLabel?: string
-    copy?: () => Promise<boolean>
-  } | null) => useUiStore.getState().patchExport({ exportFallback: v })
+
+  // Re-read the remembered folder whenever the dialog opens — permission may
+  // have lapsed since the last visit, and only a gesture may ask again.
+  useEffect(() => {
+    if (!open) return
+    void refreshExportFolder().then(({ state, name }) => {
+      useUiStore.getState().setExportFolder(name, state)
+    })
+  }, [open ])
+
+  const isAbort = (err: unknown) => err instanceof DOMException && err.name === 'AbortError'
+
+  const chooseFolder = async (reconnect: boolean) => {
+    setFolderBusy(true)
+    try {
+      const picked = reconnect ? await reconnectExportRoot() : await pickExportRoot()
+      useUiStore.getState().setExportFolder(picked.name, 'ready')
+      setStatus({ kind: 'ok', msg: `Exports will save into ${picked.name}/ — one folder per project.` })
+    } catch (err) {
+      // Cancelling the picker is not an error worth reporting.
+      if (!isAbort(err)) setStatus({ kind: 'warn', msg: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setFolderBusy(false)
+    }
+  }
+
+  const dropFolder = async () => {
+    setFolderBusy(true)
+    try {
+      await disconnectExportRoot()
+      useUiStore.getState().setExportFolder(null, 'disconnected')
+    } finally {
+      setFolderBusy(false)
+    }
+  }
 
   // Clear the previous result as soon as the dialog re-opens or the format
   // changes — done while rendering so no stale toast leaks between opens. The
@@ -127,108 +158,6 @@ export function ExportDialog({ open, onOpenChange }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, format, effScale, includeBg, includeBlur, results ? results.length : 0])
 
-  const run = async () => {
-    if (!results) return
-    setBusy(true)
-    setStatus(null)
-    setFallback(null)
-    setProgress(0)
-    try {
-      if (format === 'webm') {
-        const res = await exportAnimation(project(), results, {
-          seconds,
-          fps: 30,
-          scale: effScale,
-          onProgress: (d, t) => setProgress(Math.round((d / t) * 100)),
-        })
-        finishDownload(res.blob, res.filename, {
-          title: 'Save the animation',
-          body: 'Automatic downloads are blocked here. Right-click the link and choose “Save link as…”.',
-          url: URL.createObjectURL(res.blob ?? new Blob()),
-        })
-        setStatus({
-          kind: 'ok',
-          msg: `WebM ${outputW}×${outputH} · ${res.warnings.join(' ') || 'ready'}`.trim(),
-        })
-        return
-      }
-
-      const res = await exportProject(project(), results, {
-        format,
-        scale: effScale,
-        quality,
-        includeBackground: includeBg,
-        includeBlur,
-        flattenAdditive: flatten,
-        adobeCompat,
-      })
-
-      if (res.blob) {
-        const ok = downloadBlob(res.blob, res.filename)
-        if (!ok) {
-          setFallback({
-            title: 'Save the file manually',
-            body: 'This page blocked the download. Right-click the link below and choose “Save link as…”.',
-            url: URL.createObjectURL(res.blob),
-            copyLabel: 'Copy filename',
-            copy: () => copyText(res.filename),
-          })
-        }
-        setStatus({
-          kind: res.warnings.length ? 'warn' : 'ok',
-          msg:
-            `${res.filename} · ${fmtBytes(res.bytes)}` +
-            (res.warnings.length ? ` · ${res.warnings.join(' ')}` : ''),
-        })
-      } else if (res.svg) {
-        // SVG: give both a download attempt and a copy button
-        const blob = new Blob([res.svg], { type: 'image/svg+xml' })
-        const ok = downloadBlob(blob, res.filename)
-        if (!ok) {
-          setFallback({
-            title: 'SVG source',
-            body: 'Download was blocked — copy the markup below, or right-click the link and save it.',
-            url: URL.createObjectURL(blob),
-            copyLabel: 'Copy SVG code',
-            copy: () => copyText(res.svg ?? ''),
-          })
-        }
-        setStatus({
-          kind: res.warnings.length ? 'warn' : 'ok',
-          msg:
-            `${res.filename} · ${res.width}×${res.height} · ${fmtBytes(res.bytes)} · vector` +
-            (res.warnings.length ? ` · ${res.warnings.join(' ')}` : ''),
-        })
-      } else if (res.json) {
-        const blob = new Blob([res.json], { type: 'application/json' })
-        const ok = downloadBlob(blob, res.filename)
-        if (!ok) {
-          setFallback({
-            title: 'Project JSON',
-            body: 'Download was blocked — copy it below or save the link.',
-            url: URL.createObjectURL(blob),
-            copyLabel: 'Copy JSON',
-            copy: () => copyText(res.json ?? ''),
-          })
-        }
-        setStatus({ kind: 'ok', msg: `${res.filename} · ${fmtBytes(res.bytes)}` })
-      }
-    } catch (err) {
-      setStatus({ kind: 'warn', msg: err instanceof Error ? err.message : String(err) })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const finishDownload = (
-    blob: Blob | undefined,
-    filename: string,
-    fb: { title: string; body: string; url?: string; copyLabel?: string; copy?: () => Promise<boolean> },
-  ) => {
-    if (!blob) return
-    if (!downloadBlob(blob, filename)) setFallback(fb)
-  }
-
   const copySource = async () => {
     if (!results) return
     if (format === 'svg') {
@@ -248,10 +177,16 @@ export function ExportDialog({ open, onOpenChange }: Props) {
       setStatus({ kind: ok ? 'ok' : 'warn', msg: ok ? 'JSON copied to clipboard' : 'Copy blocked' })
       return
     }
-    // raster → copy the image bitmap
+    if (format === 'webm') {
+      setStatus({ kind: 'warn', msg: 'Copy is not supported for animations — download them instead.' })
+      return
+    }
+    // raster → copy the image bitmap. The heavy render runs in the export
+    // worker; only the clipboard write stays on the main thread.
     setBusy(true)
+    setStatus(null)
     try {
-      const res = await exportProject(project(), results, {
+      const res = await renderExportBlob({
         format,
         scale: effScale,
         quality,
@@ -266,7 +201,11 @@ export function ExportDialog({ open, onOpenChange }: Props) {
           kind: ok ? 'ok' : 'warn',
           msg: ok ? `${format.toUpperCase()} copied as an image` : 'Clipboard image copy blocked',
         })
+      } else {
+        setStatus({ kind: 'warn', msg: 'Export produced no image to copy.' })
       }
+    } catch (err) {
+      setStatus({ kind: 'warn', msg: err instanceof Error ? err.message : String(err) })
     } finally {
       setBusy(false)
     }
@@ -276,9 +215,10 @@ export function ExportDialog({ open, onOpenChange }: Props) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>Export</DialogTitle>
+          <DialogTitle>Export settings</DialogTitle>
           <DialogDescription>
-            The preview and the file come from the same IR, so what you see is what you export.
+            Remembered automatically. The Export button in the top bar downloads with
+            these settings in one click, in the background.
           </DialogDescription>
         </DialogHeader>
 
@@ -424,6 +364,59 @@ export function ExportDialog({ open, onOpenChange }: Props) {
             )}
           </div>
 
+          {/* save location */}
+          <div className="rounded-lg border p-2.5">
+            <div className="mb-1 text-xs font-medium">Save location</div>
+            {folderState === 'unsupported' ? (
+              <p className="text-[11px] leading-snug text-muted-foreground">
+                Folder saving needs Chrome or Edge — other browsers keep downloading
+                each file to Downloads as before.
+              </p>
+            ) : folderState === 'ready' && folderName ? (
+              <div>
+                <p className="text-[11px] leading-snug">
+                  Every export saves into{' '}
+                  <span className="font-mono">
+                    {folderName}/{folderNameFor(projectName)}/
+                  </span>{' '}
+                  — the project folder is reused when it exists, created when it doesn’t.
+                </p>
+                <div className="mt-1.5 flex gap-1.5">
+                  <Button size="sm" variant="outline" onClick={() => void chooseFolder(false)} disabled={folderBusy}>
+                    <FolderOpen /> Change…
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => void dropFolder()} disabled={folderBusy}>
+                    Disconnect
+                  </Button>
+                </div>
+              </div>
+            ) : folderState === 'needs-permission' ? (
+              <div>
+                <p className="text-[11px] leading-snug">
+                  Folder <span className="font-mono">{folderName ?? '…'}</span> needs access
+                  again before exports can save there.
+                </p>
+                <div className="mt-1.5">
+                  <Button size="sm" variant="outline" onClick={() => void chooseFolder(true)} disabled={folderBusy}>
+                    <FolderOpen /> Reconnect
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <p className="text-[11px] leading-snug text-muted-foreground">
+                  Pick a folder once (e.g. one inside Downloads) and every export will
+                  land in its own project folder there instead of loose in Downloads.
+                </p>
+                <div className="mt-1.5">
+                  <Button size="sm" variant="outline" onClick={() => void chooseFolder(false)} disabled={folderBusy}>
+                    <FolderOpen /> Choose folder…
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+
           {format === 'svg' && stockCheck && (
             <div className="rounded-lg border p-2.5">
               <div className="mb-1.5 text-xs font-medium">
@@ -461,8 +454,6 @@ export function ExportDialog({ open, onOpenChange }: Props) {
             </div>
           )}
 
-          {progress > 0 && busy && <Progress value={progress} className="h-1.5" />}
-
           {status && (
             <p
               className={`flex items-start gap-1.5 rounded-md border p-2 text-[11px] ${
@@ -479,18 +470,16 @@ export function ExportDialog({ open, onOpenChange }: Props) {
               {status.msg}
             </p>
           )}
-
-          {fallback && <FallbackBox key={fallback.body} {...fallback} />}
         </div>
 
         <Separator />
 
         <div className="flex items-center justify-between gap-2">
-          <Button variant="ghost" onClick={copySource} disabled={busy}>
+          <Button variant="ghost" onClick={copySource} disabled={busy || !results}>
             <Copy /> Copy {format === 'png' || format === 'jpg' || format === 'webp' ? 'image' : 'code'}
           </Button>
-          <Button onClick={run} disabled={busy || !results} className="min-w-32">
-            <Download /> {busy ? 'Working…' : 'Export'}
+          <Button onClick={() => onOpenChange(false)} className="min-w-32">
+            {busy ? 'Working…' : 'Done'}
           </Button>
         </div>
       </DialogContent>

@@ -12,6 +12,13 @@ import { buildIR, stripNodeBlur } from './ir'
 import { composeIR, type LayerResult } from './pipeline'
 import { renderCanvas, applyMotion, drawBackground, irToCanvas } from './render/canvas'
 import { renderSVG, type SvgRenderOpts } from './render/svg'
+import {
+  createCanvas,
+  get2d,
+  canvasToBlob,
+  canvasToDataURL,
+  type AnyCanvas,
+} from './canvas-factory'
 import { projectFilterOpts, rasterFilteredLayers, ditheredLayers } from './filters/attach'
 import type { BackgroundSpec, Project } from './schema'
 
@@ -83,11 +90,25 @@ function clampScale(w: number, h: number, scale: number): { scale: number; warni
 
 const formatScale = (s: number) => (Math.round(s * 100) / 100).toString()
 
-export function projectToSvg(
+/** Everything `projectToSvg` derives before it needs the raster embeds. */
+interface SvgResolved {
+  ir: IR
+  stock: boolean
+  rasterFilterIds: string[]
+  ditherIds: string[]
+  mode: 'vector' | 'hybrid' | 'image'
+  rasterLayers: string[]
+  scale: number
+  background: BackgroundSpec | undefined
+  stockBg: BackgroundSpec | undefined
+  wantBlur: boolean
+}
+
+function resolveSvg(
   project: Project,
   results: LayerResult[],
-  opts: Partial<SvgRenderOpts> = {},
-): { svg: string; ir: IR; warnings: string[] } {
+  opts: Partial<SvgRenderOpts>,
+): SvgResolved {
   const ir = compositeLayers(project, results)
   const stock = opts.adobeCompat ?? false
   const rasterFilterIds = stock ? [] : rasterFilteredLayers(project)
@@ -111,26 +132,33 @@ export function projectToSvg(
     stock && background && background.kind === 'noise'
       ? { kind: 'solid' as const, color: background.color }
       : background
+  const wantBlur = opts.includeBlur ?? true
+  return { ir, stock, rasterFilterIds, ditherIds, mode, rasterLayers, scale, background, stockBg, wantBlur }
+}
+
+function finishSvg(
+  project: Project,
+  r: SvgResolved,
+  opts: Partial<SvgRenderOpts>,
+  rasterImages: Record<string, string> | undefined,
+): { svg: string; ir: IR; warnings: string[] } {
+  const { ir, stock, rasterFilterIds, ditherIds, mode, wantBlur } = r
   const svg = renderSVG(ir, {
-    background: stockBg,
+    background: r.stockBg,
     flattenAdditive: stock ? true : opts.flattenAdditive,
     decimals: opts.decimals ?? 2,
     viewboxOnly: opts.viewboxOnly,
-    scale,
+    scale: r.scale,
     layerFilters: stock ? {} : projectFilterOpts(project).layerFilters,
-    rasterImages:
-      rasterLayers.length && !stock
-        ? rasterLayerImages(ir, project, rasterLayers, scale)
-        : undefined,
+    rasterImages,
     svgMode: mode,
     ditheredLayerIds: new Set(ditherIds),
     rasterFilteredIds: new Set(rasterFilterIds),
     layerNames: Object.fromEntries(project.layers.map((l) => [l.id, l.name])),
     adobeCompat: stock,
-    includeBlur: opts.includeBlur ?? true,
+    includeBlur: wantBlur,
   })
   const warnings: string[] = []
-  const wantBlur = opts.includeBlur ?? true
   if (!wantBlur && ir.stats.blurs > 0)
     warnings.push(
       `Blur excluded by export toggle — ${ir.stats.blurs} blurred node(s) rendered sharp.`,
@@ -146,7 +174,7 @@ export function projectToSvg(
         'Blend modes flattened to normal with opacity pre-composite; additive glow reads slightly flatter than the preview.',
       )
     const dropped = project.layers.filter((l) => (l.filters ?? []).some((f) => f.enabled)).length
-    if (dropped > 0 || background?.kind === 'noise')
+    if (dropped > 0 || r.background?.kind === 'noise')
       warnings.push('Grain/noise filters and noise backgrounds dropped for pure-vector output.')
     if (rasterFilteredLayers(project).length > 0)
       warnings.push('Raster-only filter layers exported as vectors (unfiltered); use JPEG if the look diverges.')
@@ -181,6 +209,37 @@ export function projectToSvg(
   return { svg, ir, warnings }
 }
 
+export function projectToSvg(
+  project: Project,
+  results: LayerResult[],
+  opts: Partial<SvgRenderOpts> = {},
+): { svg: string; ir: IR; warnings: string[] } {
+  const r = resolveSvg(project, results, opts)
+  const rasterImages =
+    r.rasterLayers.length && !r.stock
+      ? rasterLayerImages(r.ir, project, r.rasterLayers, r.scale)
+      : undefined
+  return finishSvg(project, r, opts, rasterImages)
+}
+
+/**
+ * Worker-side SVG: identical output to `projectToSvg`, but the raster embeds
+ * are rendered through `OffscreenCanvas` and encoded asynchronously, since a
+ * worker has no synchronous `toDataURL`.
+ */
+export async function projectToSvgAsync(
+  project: Project,
+  results: LayerResult[],
+  opts: Partial<SvgRenderOpts> = {},
+): Promise<{ svg: string; ir: IR; warnings: string[] }> {
+  const r = resolveSvg(project, results, opts)
+  const rasterImages =
+    r.rasterLayers.length && !r.stock
+      ? await rasterLayerImagesAsync(r.ir, project, r.rasterLayers, r.scale)
+      : undefined
+  return finishSvg(project, r, opts, rasterImages)
+}
+
 /**
  * Draw each raster-only-filtered layer through the canvas pipeline and return
  * it as a data URL for `<image>` embedding.
@@ -213,7 +272,38 @@ function rasterLayerImages(
           ditherLayers: dither.has(layerId) ? new Set([layerId]) : undefined,
         },
       })
-      out[layerId] = canvas.toDataURL('image/png')
+      if (canvas instanceof HTMLCanvasElement) out[layerId] = canvas.toDataURL('image/png')
+    } catch {
+      // a tainted or oversized canvas must not sink the whole export
+    }
+  }
+  return out
+}
+
+/** Async sibling of `rasterLayerImages` for the export worker (see above). */
+async function rasterLayerImagesAsync(
+  ir: IR,
+  project: Project,
+  layerIds: string[],
+  scale = 1,
+): Promise<Record<string, string>> {
+  const { layerFilters, filterSeedOf } = projectFilterOpts(project)
+  const dither = new Set(ditheredLayers(project))
+  const out: Record<string, string> = {}
+  for (const layerId of layerIds) {
+    const nodes = ir.nodes.filter((n) => n.lid === layerId)
+    if (nodes.length === 0) continue
+    try {
+      const canvas = irToCanvas(buildIR(ir.w, ir.h, nodes), {
+        scale,
+        filters: {
+          layerFilters: { [layerId]: layerFilters[layerId] ?? [] },
+          filterSeedOf,
+          ditherLayers: dither.has(layerId) ? new Set([layerId]) : undefined,
+        },
+      })
+      const url = await canvasToDataURL(canvas, 'image/png')
+      if (url) out[layerId] = url
     } catch {
       // a tainted or oversized canvas must not sink the whole export
     }
@@ -264,33 +354,85 @@ export async function exportProject(
       adobeCompat: opts.adobeCompat,
       includeBlur: opts.includeBlur ?? true,
     })
-    const width = Math.max(1, Math.round(ir.w * svgScale))
-    const height = Math.max(1, Math.round(ir.h * svgScale))
-    if (opts.adobeCompat) {
-      // ASCII, no @ or (1): stock sites reject those in filenames.
-      return {
-        format: 'svg',
-        svg,
-        bytes: new Blob([svg], { type: 'image/svg+xml' }).size,
-        width,
-        height,
-        filename: `${base}-stock.svg`,
-        warnings: [...stockWarnings, ...warnings],
-      }
-    }
-    const suffix = svgScale !== 1 ? `@${formatScale(svgScale)}x` : ''
+    return makeSvgExportResult(base, svg, ir, warnings, svgScale, stockWarnings, opts)
+  }
+
+  // raster
+  return renderRasterExport(project, results, opts)
+}
+
+/** Filename + envelope for an SVG render. Shared with the export worker. */
+export function makeSvgExportResult(
+  base: string,
+  svg: string,
+  ir: IR,
+  warnings: string[],
+  svgScale: number,
+  stockWarnings: string[],
+  opts: ExportOptions,
+): ExportResult {
+  const width = Math.max(1, Math.round(ir.w * svgScale))
+  const height = Math.max(1, Math.round(ir.h * svgScale))
+  if (opts.adobeCompat) {
+    // ASCII, no @ or (1): stock sites reject those in filenames.
     return {
       format: 'svg',
       svg,
       bytes: new Blob([svg], { type: 'image/svg+xml' }).size,
       width,
       height,
-      filename: `${base}${suffix}.svg`,
-      warnings,
+      filename: `${base}-stock.svg`,
+      warnings: [...stockWarnings, ...warnings],
     }
   }
+  const suffix = svgScale !== 1 ? `@${formatScale(svgScale)}x` : ''
+  return {
+    format: 'svg',
+    svg,
+    bytes: new Blob([svg], { type: 'image/svg+xml' }).size,
+    width,
+    height,
+    filename: `${base}${suffix}.svg`,
+    warnings,
+  }
+}
 
-  // raster
+/** The SVG scale bump the Stock artboard rule demands. Shared with the worker. */
+export function svgScaleFor(
+  project: Project,
+  opts: ExportOptions,
+): { svgScale: number; stockWarnings: string[] } {
+  let svgScale = opts.scale && Number.isFinite(opts.scale) && opts.scale > 0 ? opts.scale : 1
+  const stockWarnings: string[] = []
+  if (opts.adobeCompat) {
+    const need = Math.sqrt(15_500_000 / Math.max(1, project.canvas.w * project.canvas.h))
+    if (svgScale < need) {
+      stockWarnings.push(
+        `Scale raised to ${formatScale(need)}× so the artboard reaches 15.5 MP (${Math.round(project.canvas.w * need)}×${Math.round(project.canvas.h * need)}).`,
+      )
+      svgScale = need
+    }
+  }
+  return { svgScale, stockWarnings }
+}
+
+/** Basename for every export filename. Shared with the worker. */
+export function exportBasename(project: Project): string {
+  return sanitize(project.name || 'fx-forge')
+}
+
+/**
+ * Raster branch of `exportProject`, factored out so the export worker can run
+ * the identical path off the main thread. Canvas allocation and encoding go
+ * through the factory, which swaps in `OffscreenCanvas` inside a worker.
+ */
+export async function renderRasterExport(
+  project: Project,
+  results: LayerResult[],
+  opts: ExportOptions,
+): Promise<ExportResult> {
+  const base = sanitize(project.name || 'fx-forge')
+  const bg: BackgroundSpec | undefined = opts.includeBackground ? project.canvas.bg : undefined
   const { scale, warnings } = clampScale(project.canvas.w, project.canvas.h, opts.scale)
   const composed = compositeLayers(project, results)
   // Blur toggle: sharp raster export without touching the preview.
@@ -303,17 +445,20 @@ export async function exportProject(
     warnings.push(
       `Blur excluded by export toggle — ${composed.stats.blurs} blurred node(s) rendered sharp.`,
     )
-  const canvas = document.createElement('canvas')
+  const canvas = createCanvas(
+    Math.max(1, Math.round(ir.w * scale)),
+    Math.max(1, Math.round(ir.h * scale)),
+  )
   renderCanvas(ir, canvas, { scale, background: bg, filters: projectFilterOpts(project) })
 
-  let outCanvas: HTMLCanvasElement = canvas
+  let outCanvas: AnyCanvas = canvas
   if (opts.format === 'jpg') {
     // JPEG has no alpha: composite over white (or the project background)
     outCanvas = flattenOnto(canvas, bg ?? { kind: 'solid', color: '#ffffff' }, scale)
   }
 
   const mime = opts.format === 'png' ? 'image/png' : opts.format === 'jpg' ? 'image/jpeg' : 'image/webp'
-  const blob = await toBlob(outCanvas, mime, opts.quality)
+  const blob = await canvasToBlob(outCanvas, mime, opts.quality)
   if (!blob) {
     return {
       format: opts.format,
@@ -341,15 +486,9 @@ export async function exportProject(
   }
 }
 
-function flattenOnto(
-  src: HTMLCanvasElement,
-  bg: BackgroundSpec,
-  scale: number,
-): HTMLCanvasElement {
-  const out = document.createElement('canvas')
-  out.width = src.width
-  out.height = src.height
-  const ctx = out.getContext('2d')
+function flattenOnto(src: AnyCanvas, bg: BackgroundSpec, scale: number): AnyCanvas {
+  const out = createCanvas(src.width, src.height)
+  const ctx = get2d(out)
   if (!ctx) return src
   ctx.save()
   ctx.scale(scale, scale)
@@ -359,21 +498,11 @@ function flattenOnto(
     ctx.fillStyle = '#ffffff'
     ctx.fillRect(0, 0, w, h)
   } else {
-    drawBackground(ctx, w, h, bg)
+    drawBackground(ctx as CanvasRenderingContext2D, w, h, bg)
   }
   ctx.restore()
   ctx.drawImage(src, 0, 0)
   return out
-}
-
-function toBlob(canvas: HTMLCanvasElement, mime: string, quality: number): Promise<Blob | null> {
-  return new Promise((resolve) => {
-    try {
-      canvas.toBlob((b) => resolve(b), mime, quality)
-    } catch {
-      resolve(null)
-    }
-  })
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {

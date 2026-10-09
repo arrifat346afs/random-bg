@@ -16,6 +16,7 @@ import { LayerPanel } from '@/components/LayerPanel'
 import { Preview } from '@/components/Preview'
 import { Inspector } from '@/components/Inspector'
 import { TopBar } from '@/components/TopBar'
+import { ExportJobs } from '@/components/ExportJobs'
 import { useGlobalShortcuts } from '@/hooks/useGlobalShortcuts'
 import { useThemeEffect } from '@/hooks/useThemeEffect'
 import { useRenderer } from '@/store/useRenderer'
@@ -101,6 +102,9 @@ export default function App() {
           {dialog === 'export' && <ExportDialog open onOpenChange={() => ui().closeDialog()} />}
           {dialog === 'settings' && <SettingsDialog open onOpenChange={() => ui().closeDialog()} />}
         </Suspense>
+
+        {/* background export jobs — always mounted, independent of dialogs */}
+        <ExportJobs />
       </ErrorBoundary>
     </TooltipProvider>
   )

@@ -20,6 +20,7 @@ import {
   Dices,
   Sparkles,
   Download,
+  Settings2,
   Sun,
   Moon,
   Monitor,
@@ -39,6 +40,7 @@ import { RandomPoolDialog } from './RandomPoolDialog'
 import { Tip } from './top-bar/Tip'
 import { useRenderStore } from '@/store/renderStore'
 import { useUiStore } from '@/store/uiStore'
+import { quickExport } from '@/lib/export-run'
 
 interface Props {
   onOpenPresets: () => void
@@ -55,6 +57,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
   const canvasW = useProjectStore((s) => s.project.canvas.w)
   const canvasH = useProjectStore((s) => s.project.canvas.h)
   const generating = useRenderStore((s) => s.generating)
+  const hasResults = useRenderStore((s) => s.results !== null)
   const theme = useUiStore((s) => s.view.theme)
   const lockAspect = useUiStore((s) => s.view.lockAspect)
   const snapToCanvas = useUiStore((s) => s.view.snapToCanvas)
@@ -332,10 +335,28 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <Button size="sm" variant="glow" onClick={onOpenExport}>
-          <Download />
-          <span className="hidden sm:inline">Export</span>
-        </Button>
+        <div className="flex items-center gap-0.5">
+          <Button
+            size="sm"
+            variant="glow"
+            onClick={() => quickExport()}
+            disabled={!hasResults}
+            title="Export with the remembered settings — runs in the background"
+          >
+            <Download />
+            <span className="hidden sm:inline">Export</span>
+          </Button>
+          <Tip label="Export settings">
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              onClick={onOpenExport}
+              aria-label="Export settings"
+            >
+              <Settings2 />
+            </Button>
+          </Tip>
+        </div>
       </div>
 
       <Separator orientation="vertical" className="mx-1 hidden h-6 sm:block" />
