@@ -341,7 +341,7 @@ export function TopBar({ onOpenPresets, onOpenGallery, onOpenExport }: Props) {
             variant="glow"
             onClick={() => quickExport()}
             disabled={!hasResults}
-            title="Export with the remembered settings — runs in the background"
+            title="Export with the remembered settings — runs in the background (Ctrl+E). Shift+Ctrl+E copies instead."
           >
             <Download />
             <span className="hidden sm:inline">Export</span>

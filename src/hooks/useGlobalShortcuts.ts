@@ -13,6 +13,7 @@ import { useEffect } from 'react'
 import { isTyping } from '@/lib/keyboard'
 import { duplicateLayer } from '@/lib/project'
 import { randomise } from '@/store/randomise'
+import { copyCurrentExport, quickExport } from '@/lib/export-run'
 import { useFeedbackStore } from '@/store/feedbackStore'
 import { useProjectStore } from '@/store/projectStore'
 import { useUiStore } from '@/store/uiStore'
@@ -50,6 +51,12 @@ export function useGlobalShortcuts(): void {
       if (mod && key === 'y') {
         e.preventDefault()
         project().redo()
+        return
+      }
+      if (mod && key === 'e') {
+        e.preventDefault()
+        if (e.shiftKey) void copyCurrentExport()
+        else quickExport()
         return
       }
       if (mod && key === 'd') {

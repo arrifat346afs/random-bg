@@ -9,7 +9,7 @@
  * re-download behind in the popup when the browser blocks the download.
  */
 
-import { downloadBlob, type ExportOptions, type ExportResult } from './export'
+import { copyImage, copyText, downloadBlob, projectToSvg, type ExportOptions, type ExportResult } from './export'
 import { saveExportToProjectFolder } from './export-folder'
 import { enqueueExport } from './export-service'
 import { useExportJobsStore } from '../store/exportJobsStore'
@@ -119,6 +119,66 @@ async function finishJob(id: string, projectName: string, res: ExportResult): Pr
     blocked: !ok,
     message: ok ? warnings : `Download was blocked — use the manual link. ${warnings}`.trim(),
   })
+}
+
+/**
+ * Copy the current export to the clipboard with the remembered settings.
+ * Mirrors the ExportDialog copy button: SVG/JSON copy as text, rasters copy
+ * as an image bitmap (rendered in the export worker). Returns true on
+ * success. Never throws — failures report via `exportStatus`.
+ */
+export async function copyCurrentExport(): Promise<boolean> {
+  const ui = useUiStore.getState()
+  if (ui.exportBusy) return false
+  const project = useProjectStore.getState().project
+  const results = useRenderStore.getState().results
+  if (!results) {
+    ui.patchExport({ exportStatus: { kind: 'warn', msg: 'Nothing rendered yet.' } })
+    return false
+  }
+  const setStatus = (v: { kind: 'ok' | 'warn'; msg: string } | null) =>
+    useUiStore.getState().patchExport({ exportStatus: v })
+  const format = ui.exportFormat
+  if (format === 'svg') {
+    const { svg } = projectToSvg(project, results, {
+      flattenAdditive: ui.exportFlatten,
+      adobeCompat: ui.exportAdobeCompat,
+      includeBlur: ui.exportIncludeBlur,
+      background: ui.exportIncludeBg ? project.canvas.bg : undefined,
+      scale: ui.exportScale,
+    })
+    const ok = await copyText(svg)
+    setStatus({ kind: ok ? 'ok' : 'warn', msg: ok ? 'SVG copied to clipboard' : 'Copy blocked' })
+    return ok
+  }
+  if (format === 'json') {
+    const ok = await copyText(JSON.stringify(project, null, 2))
+    setStatus({ kind: ok ? 'ok' : 'warn', msg: ok ? 'JSON copied to clipboard' : 'Copy blocked' })
+    return ok
+  }
+  if (format === 'webm') {
+    setStatus({ kind: 'warn', msg: 'Copy is not supported for animations — download them instead.' })
+    return false
+  }
+  ui.patchExport({ exportBusy: true, exportStatus: null })
+  try {
+    const res = await renderExportBlob(currentExportOptions())
+    if (res.blob) {
+      const ok = await copyImage(res.blob)
+      setStatus({
+        kind: ok ? 'ok' : 'warn',
+        msg: ok ? `${format.toUpperCase()} copied as an image` : 'Clipboard image copy blocked',
+      })
+      return ok
+    }
+    setStatus({ kind: 'warn', msg: 'Export produced no image to copy.' })
+    return false
+  } catch (err) {
+    setStatus({ kind: 'warn', msg: err instanceof Error ? err.message : String(err) })
+    return false
+  } finally {
+    useUiStore.getState().patchExport({ exportBusy: false })
+  }
 }
 
 /**
